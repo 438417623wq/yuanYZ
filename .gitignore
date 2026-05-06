@@ -1,0 +1,33 @@
+# Gradle / Android build output
+.gradle/
+.kotlin/
+build/
+app/build/
+
+# Local machine settings
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Generated packages and temporary downloads
+*.apk
+*.aab
+*.ap_
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+tmp-*/
+classes.jar
+maven-sherpa.json
+sherpa-*.json
+
+# JVM crash / replay logs
+hs_err_pid*.log
+replay_pid*.log
+
+# OS files
+.DS_Store
+Thumbs.db
