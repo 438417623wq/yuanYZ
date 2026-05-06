@@ -508,7 +508,7 @@ fun ConverterApp(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("智能转文字", fontWeight = FontWeight.SemiBold) },
+                title = { Text("本地全能转文字", fontWeight = FontWeight.SemiBold) },
                 actions = {
                     IconButton(onClick = { showAbout = true }) {
                         Icon(Icons.Default.Info, contentDescription = "关于")
@@ -706,9 +706,13 @@ fun AboutDialog(onDismiss: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    "智能转文字以安卓本地处理为目标，支持视频转文字、语音转文字和图片转文字。项目代码不主动把用户选择的音频、视频、图片或识别文本上传到项目作者服务器。",
+                    "本地全能转文字以安卓本地处理为目标，支持视频转文字、语音转文字和图片转文字。项目代码不主动把用户选择的音频、视频、图片或识别文本上传到项目作者服务器。",
                     color = Color(0xFF334155),
                     style = MaterialTheme.typography.bodyMedium
+                )
+                NoticeSection(
+                    title = "作者",
+                    body = "开心小元\n开心哔站：https://b23.tv/OEuDkek"
                 )
                 NoticeSection(
                     title = "Vosk Android",

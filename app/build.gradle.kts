@@ -9,7 +9,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.goodzh.converter"
+        applicationId = "com.yuanYZ"
         minSdk = 23
         targetSdk = 35
         versionCode = 1
