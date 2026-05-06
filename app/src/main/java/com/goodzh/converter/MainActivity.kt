@@ -48,12 +48,14 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -72,6 +74,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -471,6 +475,7 @@ class ConverterViewModelFactory(private val application: Application) : ViewMode
     override fun <T : ViewModel> create(modelClass: Class<T>): T = ConverterViewModel(application) as T
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConverterApp(
     viewModel: ConverterViewModel = viewModel(
@@ -478,6 +483,7 @@ fun ConverterApp(
     )
 ) {
     var selected by remember { mutableStateOf(0) }
+    var showAbout by remember { mutableStateOf(false) }
     val editorSession = viewModel.activeVideoEditor
     val noteSession = viewModel.activeTextNote
 
@@ -500,6 +506,21 @@ fun ConverterApp(
     }
 
     Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("智能转文字", fontWeight = FontWeight.SemiBold) },
+                actions = {
+                    IconButton(onClick = { showAbout = true }) {
+                        Icon(Icons.Default.Info, contentDescription = "关于")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.White,
+                    titleContentColor = Color(0xFF0F172A),
+                    actionIconContentColor = Color(0xFF0F766E)
+                )
+            )
+        },
         bottomBar = {
             NavigationBar(containerColor = Color.White) {
                 NavigationBarItem(
@@ -518,6 +539,10 @@ fun ConverterApp(
         }
     ) { padding ->
         if (selected == 0) WorkbenchScreen(viewModel, padding) else HistoryScreen(viewModel, padding)
+    }
+
+    if (showAbout) {
+        AboutDialog(onDismiss = { showAbout = false })
     }
 }
 
@@ -595,7 +620,6 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Text("智能转文字", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
             Text("视频、语音、图片统一转换，结果自动进入历史记录", color = Color(0xFF52616B))
         }
         item {
@@ -666,6 +690,70 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
                 }
             )
         }
+    }
+}
+
+@Composable
+fun AboutDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("关于与第三方声明", fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 440.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "智能转文字以安卓本地处理为目标，支持视频转文字、语音转文字和图片转文字。项目代码不主动把用户选择的音频、视频、图片或识别文本上传到项目作者服务器。",
+                    color = Color(0xFF334155),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                NoticeSection(
+                    title = "Vosk Android",
+                    body = "用于备用本地语音识别。依赖 com.alphacephei:vosk-android:0.3.47，许可证为 Apache License 2.0。"
+                )
+                NoticeSection(
+                    title = "Vosk 中文小模型",
+                    body = "内置 vosk-model-small-cn-0.22，用于移动端中文本地识别。官方模型页标注为 Apache License 2.0，分发时应保留模型名称、来源、版权和许可证信息。"
+                )
+                NoticeSection(
+                    title = "sherpa-onnx",
+                    body = "用于本地离线语音识别运行时。项目内置 sherpa-onnx-1.13.0.aar，上游许可证为 Apache License 2.0。"
+                )
+                NoticeSection(
+                    title = "SenseVoice / FunASR 模型",
+                    body = "用于本地离线语音识别。项目内置模型由 SenseVoice / FunASR 相关模型转换得到，遵循 FunASR Model Open Source License Agreement 1.1。二次分发或商业化时应注明来源和作者信息，并保留相关模型名称。"
+                )
+                NoticeSection(
+                    title = "Google ML Kit Text Recognition",
+                    body = "用于图片 OCR。ML Kit 对输入数据的处理在设备端完成，但可能联系 Google 服务器获取修复、模型更新、硬件兼容信息，也可能发送 API 性能和使用指标。"
+                )
+                NoticeSection(
+                    title = "AndroidX / Jetpack Compose / Kotlin",
+                    body = "用于 Android 应用框架、界面和协程能力。相关组件通常遵循 Apache License 2.0，以实际依赖包随附许可证为准。"
+                )
+                Text(
+                    "完整声明见仓库 THIRD_PARTY_NOTICES.md、PRIVACY.md 和 LICENSE。公开可见不等于授予开源许可；本项目原创代码默认保留所有权利。",
+                    color = Color(0xFF64748B),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("知道了")
+            }
+        }
+    )
+}
+
+@Composable
+fun NoticeSection(title: String, body: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, fontWeight = FontWeight.SemiBold, color = Color(0xFF0F172A))
+        Text(body, color = Color(0xFF475569), style = MaterialTheme.typography.bodySmall)
     }
 }
 
