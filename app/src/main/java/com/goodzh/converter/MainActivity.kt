@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
@@ -33,11 +34,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -96,6 +99,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -488,16 +492,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun openVideoEditor(record: ConversionRecord) {
-        if (record.type != ConversionType.Video || record.status != ConversionStatus.Success || record.sourceUri.isBlank()) return
-        val uri = Uri.parse(record.sourceUri)
-        val segments = record.segmentsJson.toSubtitleSegments()
-            .ifEmpty { buildSubtitleSegments(record.resultText, 0L) }
-        activeVideoEditor = VideoEditSession(
-            recordId = record.id,
-            title = record.title,
-            videoUri = uri,
-            segments = segments
-        )
+        activeVideoEditor = record.toVideoEditSession() ?: return
     }
 
     fun closeVideoEditor() {
@@ -507,21 +502,21 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
     fun saveVideoSubtitles(segments: List<SubtitleSegment>) {
         val session = activeVideoEditor ?: return
         viewModelScope.launch {
-            val editedText = segments.joinToString("\n") { it.text }.trim()
-            currentText = editedText
-            statusText = "字幕修改已保存"
-            app.repository.update(
-                ConversionRecord(
-                    id = session.recordId,
-                    type = ConversionType.Video,
-                    title = session.title,
-                    sourceUri = session.videoUri.toString(),
-                    resultText = editedText,
-                    segmentsJson = segments.toJsonString(),
-                    status = ConversionStatus.Success
-                )
-            )
+            updateVideoSession(session, segments)
             activeVideoEditor = session.copy(segments = segments)
+        }
+    }
+
+    fun switchVideoEditor(record: ConversionRecord, saveCurrentSegments: List<SubtitleSegment>?) {
+        val currentSession = activeVideoEditor
+        val nextSession = record.toVideoEditSession() ?: return
+        viewModelScope.launch {
+            if (saveCurrentSegments != null && currentSession != null && currentSession.recordId != record.id) {
+                updateVideoSession(currentSession, saveCurrentSegments)
+            }
+            activeVideoEditor = nextSession
+            currentText = nextSession.segments.joinToString("\n") { it.text }.trim()
+            statusText = "已切换视频：${nextSession.title}"
         }
     }
 
@@ -548,6 +543,31 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             )
         }
     }
+
+    private suspend fun updateVideoSession(session: VideoEditSession, segments: List<SubtitleSegment>) {
+        val editedText = segments.joinToString("\n") { it.text }.trim()
+        val existing = records.value.firstOrNull { it.id == session.recordId }
+        currentText = editedText
+        statusText = "字幕修改已保存"
+        app.repository.update(
+            existing?.copy(
+                title = session.title,
+                sourceUri = session.videoUri.toString(),
+                resultText = editedText,
+                segmentsJson = segments.toJsonString(),
+                status = ConversionStatus.Success,
+                message = ""
+            ) ?: ConversionRecord(
+                id = session.recordId,
+                type = ConversionType.Video,
+                title = session.title,
+                sourceUri = session.videoUri.toString(),
+                resultText = editedText,
+                segmentsJson = segments.toJsonString(),
+                status = ConversionStatus.Success
+            )
+        )
+    }
 }
 
 @Suppress("UNCHECKED_CAST")
@@ -566,13 +586,17 @@ fun ConverterApp(
     var showAbout by remember { mutableStateOf(false) }
     val editorSession = viewModel.activeVideoEditor
     val noteSession = viewModel.activeTextNote
+    val records by viewModel.records.collectAsState()
+    val videoRecords = records.filter { it.isOpenableVideoRecord() }
 
     if (editorSession != null) {
         VideoSubtitleEditorScreen(
             session = editorSession,
+            videoRecords = videoRecords,
             onClose = viewModel::closeVideoEditor,
             onSave = viewModel::saveVideoSubtitles,
-            onReplaceVideo = viewModel::replaceVideoEditorUri
+            onReplaceVideo = viewModel::replaceVideoEditorUri,
+            onSwitchVideo = viewModel::switchVideoEditor
         )
         return
     }
@@ -1027,11 +1051,14 @@ fun TextNoteScreen(
 @Composable
 fun VideoSubtitleEditorScreen(
     session: VideoEditSession,
+    videoRecords: List<ConversionRecord>,
     onClose: () -> Unit,
     onSave: (List<SubtitleSegment>) -> Unit,
-    onReplaceVideo: (Uri, List<SubtitleSegment>) -> Unit
+    onReplaceVideo: (Uri, List<SubtitleSegment>) -> Unit,
+    onSwitchVideo: (ConversionRecord, List<SubtitleSegment>?) -> Unit
 ) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
     val activity = context as? Activity
     val clipboard = LocalClipboardManager.current
     var segments by remember(session.recordId, session.segments) { mutableStateOf(session.segments) }
@@ -1046,7 +1073,10 @@ fun VideoSubtitleEditorScreen(
     var playbackSpeed by remember { mutableStateOf(1f) }
     var speedMenuExpanded by remember { mutableStateOf(false) }
     var isFullScreen by remember { mutableStateOf(false) }
+    var showVideoHistory by remember { mutableStateOf(false) }
+    var pendingSwitchRecord by remember { mutableStateOf<ConversionRecord?>(null) }
     var orientationMode by remember { mutableStateOf(VideoOrientationMode.Auto) }
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     BackHandler {
         if (isFullScreen) {
@@ -1059,7 +1089,20 @@ fun VideoSubtitleEditorScreen(
     val selectedSegment = segments.firstOrNull { it.id == selectedId } ?: segments.firstOrNull()
     val activeSegment = segments.lastOrNull { positionMs.toLong() >= it.startMs } ?: segments.firstOrNull()
     val fullText = segments.joinToString("\n") { it.text }.trim()
+    val hasUnsavedChanges = remember(segments, session.segments) {
+        segments.toJsonString() != session.segments.toJsonString()
+    }
     val speedOptions = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+    val requestVideoSwitch: (ConversionRecord) -> Unit = { record ->
+        if (record.id == session.recordId) {
+            showVideoHistory = false
+        } else if (hasUnsavedChanges) {
+            pendingSwitchRecord = record
+        } else {
+            showVideoHistory = false
+            onSwitchVideo(record, null)
+        }
+    }
     val player = remember(session.videoUri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(session.videoUri))
@@ -1081,6 +1124,14 @@ fun VideoSubtitleEditorScreen(
             player.prepare()
             onReplaceVideo(it, segments)
         }
+    }
+
+    LaunchedEffect(session.recordId) {
+        positionMs = 0
+        durationMs = 0
+        isPlaying = false
+        showVideoHistory = false
+        pendingSwitchRecord = null
     }
 
     val togglePlayback: () -> Unit = {
@@ -1183,50 +1234,51 @@ fun VideoSubtitleEditorScreen(
         }
     }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF111111))
     ) {
-        if (!isFullScreen) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onClose) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
-                }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("字幕校对", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(session.title, color = Color(0xFFBDBDBD), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                IconButton(onClick = {
-                    if (fullText.isNotBlank()) clipboard.setText(AnnotatedString(fullText))
-                }) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = "复制", tint = Color.White)
-                }
-                IconButton(onClick = {
-                    if (fullText.isNotBlank()) shareText(context, fullText)
-                }) {
-                    Icon(Icons.Default.Share, contentDescription = "分享", tint = Color.White)
-                }
-                Button(onClick = { onSave(segments) }) {
-                    Icon(Icons.Default.Check, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("保存")
+        Column(modifier = Modifier.fillMaxSize()) {
+            if (!isFullScreen) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("字幕校对", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(session.title, color = Color(0xFFBDBDBD), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    IconButton(onClick = {
+                        if (fullText.isNotBlank()) clipboard.setText(AnnotatedString(fullText))
+                    }) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "复制", tint = Color.White)
+                    }
+                    IconButton(onClick = {
+                        if (fullText.isNotBlank()) shareText(context, fullText)
+                    }) {
+                        Icon(Icons.Default.Share, contentDescription = "分享", tint = Color.White)
+                    }
+                    Button(onClick = { onSave(segments) }) {
+                        Icon(Icons.Default.Check, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("保存")
+                    }
                 }
             }
-        }
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .background(Color.Black),
-            contentAlignment = Alignment.Center
-        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(Color.Black),
+                contentAlignment = Alignment.Center
+            ) {
             AndroidView(
                 factory = { ctx ->
                     PlayerView(ctx).apply {
@@ -1249,6 +1301,19 @@ fun VideoSubtitleEditorScreen(
                     .fillMaxSize()
                     .clickable(onClick = togglePlayback)
             )
+
+            if (isFullScreen) {
+                IconButton(
+                    onClick = { showVideoHistory = true },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(16.dp)
+                        .size(46.dp)
+                        .background(Color.Black.copy(alpha = 0.58f), RoundedCornerShape(23.dp))
+                ) {
+                    Icon(Icons.Default.History, contentDescription = "历史视频", tint = Color.White)
+                }
+            }
 
             Text(
                 activeSegment?.text.orEmpty(),
@@ -1395,6 +1460,17 @@ fun VideoSubtitleEditorScreen(
                 }
             }
         }
+        }
+
+        if (isFullScreen && showVideoHistory) {
+            FullScreenVideoHistoryPanel(
+                records = videoRecords,
+                currentRecordId = session.recordId,
+                isLandscape = isLandscape,
+                onSelect = requestVideoSwitch,
+                onDismiss = { showVideoHistory = false }
+            )
+        }
     }
 
     val editingSegment = segments.firstOrNull { it.id == editingSegmentId }
@@ -1429,6 +1505,138 @@ fun VideoSubtitleEditorScreen(
                 }
             }
         )
+    }
+
+    pendingSwitchRecord?.let { record ->
+        AlertDialog(
+            onDismissRequest = { pendingSwitchRecord = null },
+            title = { Text("当前字幕还未保存") },
+            text = { Text("切换到“${record.title}”前，是否保存当前字幕修改？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showVideoHistory = false
+                        pendingSwitchRecord = null
+                        onSwitchVideo(record, segments)
+                    }
+                ) {
+                    Text("保存并切换")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { pendingSwitchRecord = null }) {
+                        Text("取消")
+                    }
+                    TextButton(
+                        onClick = {
+                            showVideoHistory = false
+                            pendingSwitchRecord = null
+                            onSwitchVideo(record, null)
+                        }
+                    ) {
+                        Text("不保存切换")
+                    }
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun FullScreenVideoHistoryPanel(
+    records: List<ConversionRecord>,
+    currentRecordId: Long,
+    isLandscape: Boolean,
+    onSelect: (ConversionRecord) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.36f))
+                .clickable(onClick = onDismiss)
+        )
+
+        val panelModifier = if (isLandscape) {
+            Modifier
+                .align(Alignment.CenterEnd)
+                .fillMaxHeight()
+                .widthIn(min = 300.dp, max = 380.dp)
+                .padding(vertical = 16.dp, horizontal = 14.dp)
+        } else {
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .heightIn(max = 380.dp)
+                .padding(12.dp)
+        }
+
+        Surface(
+            modifier = panelModifier,
+            shape = RoundedCornerShape(8.dp),
+            color = Color(0xFF202020)
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("已转换视频", color = Color.White, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    TextButton(onClick = onDismiss) {
+                        Text("关闭")
+                    }
+                }
+
+                if (records.isEmpty()) {
+                    Text("暂无已转换视频", color = Color(0xFFBDBDBD), modifier = Modifier.padding(vertical = 24.dp))
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(records, key = { it.id }) { record ->
+                            FullScreenVideoHistoryItem(
+                                record = record,
+                                isCurrent = record.id == currentRecordId,
+                                onClick = { onSelect(record) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FullScreenVideoHistoryItem(
+    record: ConversionRecord,
+    isCurrent: Boolean,
+    onClick: () -> Unit
+) {
+    val segmentCount = remember(record.segmentsJson, record.resultText) {
+        record.subtitleSegmentCount()
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .background(if (isCurrent) Color(0xFF303A3A) else Color(0xFF2A2A2A), RoundedCornerShape(6.dp))
+            .border(
+                BorderStroke(1.dp, if (isCurrent) Color(0xFF14B8A6) else Color(0xFF3A3A3A)),
+                RoundedCornerShape(6.dp)
+            )
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Icon(Icons.Default.Videocam, contentDescription = null, tint = Color(0xFF9FE7DC), modifier = Modifier.size(22.dp))
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(record.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
+            Text("${timeLabel(record.createdAt)} · ${segmentCount}段字幕", color = Color(0xFFBDBDBD), style = MaterialTheme.typography.bodySmall)
+        }
+        if (isCurrent) {
+            Text("当前", color = Color(0xFF5EEAD4), style = MaterialTheme.typography.labelMedium)
+        }
     }
 }
 
@@ -1727,6 +1935,29 @@ private fun shareText(context: Context, text: String) {
     }
     context.startActivity(Intent.createChooser(intent, "分享文字"))
 }
+
+private fun ConversionRecord.isOpenableVideoRecord(): Boolean =
+    type == ConversionType.Video &&
+        status == ConversionStatus.Success &&
+        sourceUri.isNotBlank() &&
+        (segmentsJson.isNotBlank() || resultText.isNotBlank())
+
+private fun ConversionRecord.toVideoEditSession(): VideoEditSession? {
+    if (!isOpenableVideoRecord()) return null
+    val segments = segmentsJson.toSubtitleSegments()
+        .ifEmpty { buildSubtitleSegments(resultText, 0L) }
+    if (segments.isEmpty()) return null
+    return VideoEditSession(
+        recordId = id,
+        title = title,
+        videoUri = Uri.parse(sourceUri),
+        segments = segments
+    )
+}
+
+private fun ConversionRecord.subtitleSegmentCount(): Int =
+    segmentsJson.toSubtitleSegments().size.takeIf { it > 0 }
+        ?: buildSubtitleSegments(resultText, 0L).size
 
 private fun buildSubtitleSegments(text: String, durationMs: Long): List<SubtitleSegment> {
     val sentences = text
