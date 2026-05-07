@@ -53,6 +53,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
@@ -62,6 +64,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
@@ -141,6 +144,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -238,6 +242,17 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                 statusText = "本地语音模型缺失，请重新安装新版 APK"
             }
         }
+        viewModelScope.launch {
+            BackgroundConversionBus.state.collect { state ->
+                if (state.message.isBlank()) return@collect
+                busy = state.running
+                progress = state.progress
+                statusText = state.message
+                if (state.resultText.isNotBlank()) {
+                    currentText = state.resultText
+                }
+            }
+        }
     }
 
     private fun loadPerformanceMode(): PerformanceMode =
@@ -270,176 +285,37 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun transcribeVideo(uri: Uri, language: SpeechLanguage) {
-        viewModelScope.launch {
-            val name = displayName(getApplication(), uri)
-            val profile = performanceMode.profile
-            if (!sherpaEngine.isBundledModelReady()) {
-                sherpaReady = false
-                statusText = "缺少内置精准模型，请重新安装新版 APK"
-                app.repository.save(
-                    ConversionRecord(
-                        type = ConversionType.Video,
-                        title = name,
-                        sourceUri = uri.toString(),
-                        resultText = "",
-                        status = ConversionStatus.Failed,
-                        message = "缺少 sherpa-onnx 精准模型，未上传云端。"
-                    )
-                )
-                return@launch
-            }
-
-            busy = true
-            progress = 0f
-            currentText = ""
-            statusText = "正在本地提取视频音频..."
-            runCatching {
-                val wav = audioExtractor.extractToWav(uri) { value ->
-                    progress = value
-                    statusText = "正在本地提取音频 ${(value * 100).toInt()}%"
-                }
-                statusText = "正在识别${language.label}：${performanceMode.label}模式"
-                val chunks = sherpaEngine.transcribeChunks(wav, language, profile) { value ->
-                    progress = value
-                    statusText = "正在识别${language.label} ${(value * 100).toInt()}%"
-                }
-                val finalText = joinRecognizedChunks(chunks, language)
-                    .ifBlank { "未识别到语音文字" }
-                val durationMs = videoDurationMs(getApplication(), uri)
-                wav.delete()
-                val segments = buildSubtitleSegmentsFromChunks(chunks, language, durationMs)
-                    .ifEmpty { buildSubtitleSegments(finalText, durationMs) }
-                finalText to segments
-            }.onSuccess { result ->
-                val (text, segments) = result
-                currentText = text
-                progress = 1f
-                statusText = "视频本地转文字完成：${language.label}"
-                val record = ConversionRecord(
-                    type = ConversionType.Video,
-                    title = name,
-                    sourceUri = uri.toString(),
-                    resultText = text,
-                    segmentsJson = segments.toJsonString(),
-                    status = ConversionStatus.Success
-                )
-                app.repository.save(record)
-                activeVideoEditor = VideoEditSession(
-                    recordId = record.id,
-                    title = name,
-                    videoUri = uri,
-                    segments = segments
-                )
-            }.onFailure { error ->
-                currentText = ""
-                statusText = "视频本地转文字失败：${error.message ?: "未知错误"}"
-                app.repository.save(
-                    ConversionRecord(
-                        type = ConversionType.Video,
-                        title = name,
-                        sourceUri = uri.toString(),
-                        resultText = "",
-                        status = ConversionStatus.Failed,
-                        message = statusText
-                    )
-                )
-            }
-            busy = false
+        if (!sherpaEngine.isBundledModelReady()) {
+            sherpaReady = false
+            statusText = "缺少内置精准模型，请重新安装新版 APK"
+            return
         }
+        busy = true
+        progress = 0f
+        currentText = ""
+        statusText = "视频后台转换已开始，可切到后台继续"
+        BackgroundConversionService.start(getApplication(), ConversionType.Video, uri, language, performanceMode)
     }
 
     fun recognizeImage(uri: Uri) {
-        viewModelScope.launch {
-            busy = true
-            progress = 0f
-            statusText = "正在识别图片文字..."
-            val name = displayName(getApplication(), uri)
-            runCatching { ocr.recognize(uri, performanceMode.profile) }
-                .onSuccess { text ->
-                    currentText = text.ifBlank { "未识别到文字" }
-                    statusText = "图片识别完成"
-                    app.repository.save(
-                        ConversionRecord(
-                            type = ConversionType.Image,
-                            title = name,
-                            sourceUri = uri.toString(),
-                            resultText = currentText,
-                            status = ConversionStatus.Success
-                        )
-                    )
-                }
-                .onFailure { error ->
-                    currentText = ""
-                    statusText = "图片识别失败：${error.message ?: "未知错误"}"
-                }
-            busy = false
-        }
+        busy = true
+        progress = 0f
+        currentText = ""
+        statusText = "图片后台识别已开始，可切到后台继续"
+        BackgroundConversionService.start(getApplication(), ConversionType.Image, uri, null, performanceMode)
     }
 
     fun transcribeAudio(uri: Uri, language: SpeechLanguage) {
-        viewModelScope.launch {
-            val name = displayName(getApplication(), uri)
-            val profile = performanceMode.profile
-            if (!sherpaEngine.isBundledModelReady()) {
-                sherpaReady = false
-                statusText = "缺少内置语音模型，请重新安装新版 APK"
-                app.repository.save(
-                    ConversionRecord(
-                        type = ConversionType.Audio,
-                        title = name,
-                        sourceUri = uri.toString(),
-                        resultText = "",
-                        status = ConversionStatus.Failed,
-                        message = "缺少 sherpa-onnx 语音模型，未上传云端。"
-                    )
-                )
-                return@launch
-            }
-            busy = true
-            progress = 0f
-            currentText = ""
-            statusText = "正在本地读取音频..."
-            runCatching {
-                val wav = audioExtractor.extractToWav(uri) { value ->
-                    progress = value
-                    statusText = "正在本地处理音频 ${(value * 100).toInt()}%"
-                }
-                statusText = "正在识别${language.label}：${performanceMode.label}模式"
-                val text = sherpaEngine.transcribe(wav, language, profile) { value ->
-                    progress = value
-                    statusText = "正在识别${language.label} ${(value * 100).toInt()}%"
-                }
-                wav.delete()
-                normalizeRecognizedText(text, language).ifBlank { "未识别到语音文字" }
-            }.onSuccess { text ->
-                currentText = text
-                progress = 1f
-                statusText = "音频本地转文字完成：${language.label}"
-                app.repository.save(
-                    ConversionRecord(
-                        type = ConversionType.Audio,
-                        title = name,
-                        sourceUri = uri.toString(),
-                        resultText = text,
-                        status = ConversionStatus.Success
-                    )
-                )
-            }.onFailure { error ->
-                currentText = ""
-                statusText = "音频本地转文字失败：${error.message ?: "未知错误"}"
-                app.repository.save(
-                    ConversionRecord(
-                        type = ConversionType.Audio,
-                        title = name,
-                        sourceUri = uri.toString(),
-                        resultText = "",
-                        status = ConversionStatus.Failed,
-                        message = statusText
-                    )
-                )
-            }
-            busy = false
+        if (!sherpaEngine.isBundledModelReady()) {
+            sherpaReady = false
+            statusText = "缺少内置语音模型，请重新安装新版 APK"
+            return
         }
+        busy = true
+        progress = 0f
+        currentText = ""
+        statusText = "音频后台转换已开始，可切到后台继续"
+        BackgroundConversionService.start(getApplication(), ConversionType.Audio, uri, language, performanceMode)
     }
 
     fun saveSpeechResult(text: String) {
@@ -698,6 +574,7 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
     }
 
     val recognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             liveSpeechActive = true
@@ -715,6 +592,14 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
             speechPaused = false
             listening = false
             liveSpeechNotice = "需要录音权限"
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
     fun startLiveSpeech() {
@@ -1287,6 +1172,8 @@ fun VideoSubtitleEditorScreen(
     var playbackSpeed by remember { mutableStateOf(1f) }
     var speedMenuExpanded by remember { mutableStateOf(false) }
     var isFullScreen by remember { mutableStateOf(false) }
+    var showPlayerControls by remember { mutableStateOf(true) }
+    var subtitlesVisible by remember { mutableStateOf(true) }
     var showVideoHistory by remember { mutableStateOf(false) }
     var pendingSwitchRecord by remember { mutableStateOf<ConversionRecord?>(null) }
     var orientationMode by remember { mutableStateOf(VideoOrientationMode.Auto) }
@@ -1351,6 +1238,7 @@ fun VideoSubtitleEditorScreen(
     }
 
     val togglePlayback: () -> Unit = {
+        showPlayerControls = true
         if (player.isPlaying) {
             player.pause()
             isPlaying = false
@@ -1365,6 +1253,13 @@ fun VideoSubtitleEditorScreen(
                 isPlaying = false
             }
         }
+    }
+    val seekBy: (Long) -> Unit = { deltaMs ->
+        showPlayerControls = true
+        val maxDuration = durationMs.takeIf { it > 0 }?.toLong() ?: player.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
+        val target = (player.currentPosition + deltaMs).coerceIn(0L, maxDuration)
+        player.seekTo(target)
+        positionMs = target.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     }
 
     DisposableEffect(activity) {
@@ -1436,6 +1331,17 @@ fun VideoSubtitleEditorScreen(
 
     LaunchedEffect(player, playbackSpeed) {
         player.setPlaybackSpeed(playbackSpeed)
+    }
+
+    LaunchedEffect(isFullScreen) {
+        showPlayerControls = true
+    }
+
+    LaunchedEffect(isFullScreen, isPlaying, showPlayerControls) {
+        if (isFullScreen && isPlaying && showPlayerControls) {
+            delay(3000)
+            if (isFullScreen && isPlaying) showPlayerControls = false
+        }
     }
 
     LaunchedEffect(player) {
@@ -1515,33 +1421,93 @@ fun VideoSubtitleEditorScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clickable(onClick = togglePlayback)
+                    .clickable(
+                        onClick = {
+                            if (isFullScreen) {
+                                showPlayerControls = !showPlayerControls
+                            } else {
+                                togglePlayback()
+                            }
+                        }
+                    )
             )
 
-            if (isFullScreen) {
-                IconButton(
-                    onClick = { showVideoHistory = true },
+            if (isFullScreen && showPlayerControls) {
+                Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(16.dp)
-                        .size(46.dp)
-                        .background(Color.Black.copy(alpha = 0.58f), RoundedCornerShape(23.dp))
+                        .fillMaxWidth()
+                        .padding(12.dp)
+                        .background(Color.Black.copy(alpha = 0.56f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.History, contentDescription = "历史视频", tint = Color.White)
+                    IconButton(onClick = { isFullScreen = false }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "退出全屏", tint = Color.White)
+                    }
+                    Text(
+                        session.title,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    IconButton(onClick = { showVideoHistory = true }) {
+                        Icon(Icons.Default.History, contentDescription = "历史视频", tint = Color.White)
+                    }
+                    IconButton(onClick = { subtitlesVisible = !subtitlesVisible }) {
+                        Icon(
+                            Icons.Default.Subtitles,
+                            contentDescription = "字幕开关",
+                            tint = if (subtitlesVisible) Color.White else Color(0xFF777777)
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .background(Color.Black.copy(alpha = 0.42f), RoundedCornerShape(36.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(18.dp)
+                ) {
+                    IconButton(onClick = { seekBy(-10_000L) }, modifier = Modifier.size(52.dp)) {
+                        Icon(Icons.Default.FastRewind, contentDescription = "快退10秒", tint = Color.White, modifier = Modifier.size(34.dp))
+                    }
+                    IconButton(
+                        onClick = togglePlayback,
+                        modifier = Modifier
+                            .size(64.dp)
+                            .background(Color.White, RoundedCornerShape(32.dp))
+                    ) {
+                        Icon(
+                            if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = "播放",
+                            tint = Color.Black,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+                    IconButton(onClick = { seekBy(10_000L) }, modifier = Modifier.size(52.dp)) {
+                        Icon(Icons.Default.FastForward, contentDescription = "快进10秒", tint = Color.White, modifier = Modifier.size(34.dp))
+                    }
                 }
             }
 
-            Text(
-                activeSegment?.text.orEmpty(),
-                color = Color.White,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(18.dp)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
-            )
+            if (subtitlesVisible && activeSegment != null) {
+                Text(
+                    activeSegment.text,
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(18.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+            }
 
             if (!isVideoReady || videoError != null) {
                 Column(
@@ -1567,61 +1533,77 @@ fun VideoSubtitleEditorScreen(
             }
         }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF171717))
-                .padding(horizontal = 18.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            val safeDuration = durationMs.coerceAtLeast(1)
-            Column(modifier = Modifier.weight(1f)) {
-                Text("${formatDuration(positionMs.toLong())} / ${formatDuration(durationMs.toLong())}", color = Color.White)
-                Slider(
-                    value = positionMs.coerceIn(0, safeDuration).toFloat(),
-                    onValueChange = { positionMs = it.toInt() },
-                    onValueChangeFinished = { player.seekTo(positionMs.toLong()) },
-                    valueRange = 0f..safeDuration.toFloat()
-                )
-            }
-            Box {
-                TextButton(onClick = { speedMenuExpanded = true }) {
-                    Text(formatSpeed(playbackSpeed), color = Color.White)
+        if (!isFullScreen || showPlayerControls) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF171717))
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val safeDuration = durationMs.coerceAtLeast(1)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("${formatDuration(positionMs.toLong())} / ${formatDuration(durationMs.toLong())}", color = Color.White)
+                    Slider(
+                        value = positionMs.coerceIn(0, safeDuration).toFloat(),
+                        onValueChange = {
+                            showPlayerControls = true
+                            positionMs = it.toInt()
+                        },
+                        onValueChangeFinished = { player.seekTo(positionMs.toLong()) },
+                        valueRange = 0f..safeDuration.toFloat()
+                    )
                 }
-                DropdownMenu(
-                    expanded = speedMenuExpanded,
-                    onDismissRequest = { speedMenuExpanded = false }
-                ) {
-                    speedOptions.forEach { speed ->
-                        DropdownMenuItem(
-                            text = { Text(formatSpeed(speed)) },
-                            onClick = {
-                                playbackSpeed = speed
-                                speedMenuExpanded = false
-                            }
+                if (isFullScreen) {
+                    TextButton(onClick = { segments = segments.shiftedBy(-500L) }) {
+                        Text("-0.5s", color = Color.White)
+                    }
+                    TextButton(onClick = { segments = segments.shiftedBy(500L) }) {
+                        Text("+0.5s", color = Color.White)
+                    }
+                }
+                Box {
+                    TextButton(onClick = { speedMenuExpanded = true }) {
+                        Text(formatSpeed(playbackSpeed), color = Color.White)
+                    }
+                    DropdownMenu(
+                        expanded = speedMenuExpanded,
+                        onDismissRequest = { speedMenuExpanded = false }
+                    ) {
+                        speedOptions.forEach { speed ->
+                            DropdownMenuItem(
+                                text = { Text(formatSpeed(speed)) },
+                                onClick = {
+                                    playbackSpeed = speed
+                                    speedMenuExpanded = false
+                                    showPlayerControls = true
+                                }
+                            )
+                        }
+                    }
+                }
+                TextButton(onClick = { orientationMode = orientationMode.next() }) {
+                    Icon(Icons.Default.ScreenRotation, contentDescription = null, tint = Color.White)
+                    Spacer(Modifier.width(4.dp))
+                    Text(orientationMode.label, color = Color.White)
+                }
+                TextButton(onClick = { isFullScreen = !isFullScreen }) {
+                    Text(if (isFullScreen) "退出全屏" else "全屏", color = Color.White)
+                }
+                if (!isFullScreen) {
+                    IconButton(
+                        onClick = togglePlayback,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(Color.White, RoundedCornerShape(24.dp))
+                    ) {
+                        Icon(
+                            if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = "播放",
+                            tint = Color.Black
                         )
                     }
                 }
-            }
-            TextButton(onClick = { orientationMode = orientationMode.next() }) {
-                Icon(Icons.Default.ScreenRotation, contentDescription = null, tint = Color.White)
-                Spacer(Modifier.width(4.dp))
-                Text(orientationMode.label, color = Color.White)
-            }
-            TextButton(onClick = { isFullScreen = !isFullScreen }) {
-                Text(if (isFullScreen) "退出全屏" else "全屏", color = Color.White)
-            }
-            IconButton(
-                onClick = togglePlayback,
-                modifier = Modifier
-                    .size(48.dp)
-                    .background(Color.White, RoundedCornerShape(24.dp))
-            ) {
-                Icon(
-                    if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = "播放",
-                    tint = Color.Black
-                )
             }
         }
 
