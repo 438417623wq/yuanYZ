@@ -131,10 +131,14 @@ import com.goodzh.converter.data.ConversionStatus
 import com.goodzh.converter.data.ConversionType
 import com.goodzh.converter.domain.ModelManager
 import com.goodzh.converter.domain.OcrConverter
+import com.goodzh.converter.domain.LocalTranslationEngine
 import com.goodzh.converter.domain.PerformanceMode
 import com.goodzh.converter.domain.SpeechLanguage
 import com.goodzh.converter.domain.SpeechTranscriptChunk
 import com.goodzh.converter.domain.SherpaSpeechEngine
+import com.goodzh.converter.domain.TranslationApplyMode
+import com.goodzh.converter.domain.TranslationLanguage
+import com.goodzh.converter.domain.TranslationModelStatus
 import com.goodzh.converter.domain.VideoAudioExtractor
 import com.goodzh.converter.domain.displayName
 import com.goodzh.converter.domain.profile
@@ -175,7 +179,9 @@ data class VideoEditSession(
     val recordId: Long,
     val title: String,
     val videoUri: Uri,
-    val segments: List<SubtitleSegment>
+    val segments: List<SubtitleSegment>,
+    val translatedSegments: List<SubtitleSegment> = emptyList(),
+    val subtitleDisplayMode: SubtitleDisplayMode = SubtitleDisplayMode.Original
 )
 
 data class TextNoteSession(
@@ -199,12 +205,19 @@ enum class VideoOrientationMode(
     }
 }
 
+enum class SubtitleDisplayMode(val label: String) {
+    Original("原文"),
+    Translation("译文"),
+    Bilingual("双语")
+}
+
 class ConverterViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as GoodZhApp
     private val ocr = OcrConverter(application)
     private val modelManager = ModelManager(application)
     private val audioExtractor = VideoAudioExtractor(application)
     private val sherpaEngine = SherpaSpeechEngine(application)
+    private val translationEngine = LocalTranslationEngine(application)
     private val settings = application.getSharedPreferences("goodzh_settings", Context.MODE_PRIVATE)
 
     val records: StateFlow<List<ConversionRecord>> = app.repository.records.stateIn(
@@ -226,6 +239,8 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
     var sherpaReady by mutableStateOf(sherpaEngine.isBundledModelReady())
         private set
     var performanceMode by mutableStateOf(loadPerformanceMode())
+        private set
+    var translationStatus by mutableStateOf(translationEngine.status())
         private set
     var activeVideoEditor by mutableStateOf<VideoEditSession?>(null)
         private set
@@ -264,6 +279,10 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         performanceMode = mode
         settings.edit().putString("performance_mode", mode.name).apply()
         statusText = "性能模式已切换为：${mode.label}"
+    }
+
+    fun refreshTranslationStatus() {
+        translationStatus = translationEngine.status()
     }
 
     fun importModel(uri: Uri) {
@@ -392,7 +411,78 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         val session = activeVideoEditor ?: return
         viewModelScope.launch {
             updateVideoSession(session, segments)
-            activeVideoEditor = session.copy(segments = segments)
+            val alignedTranslatedSegments = alignTranslatedSegments(segments, session.translatedSegments)
+            activeVideoEditor = session.copy(
+                segments = segments,
+                translatedSegments = alignedTranslatedSegments,
+                subtitleDisplayMode = if (alignedTranslatedSegments.isEmpty()) {
+                    SubtitleDisplayMode.Original
+                } else {
+                    session.subtitleDisplayMode
+                }
+            )
+        }
+    }
+
+    fun translateVideoSubtitles(
+        source: TranslationLanguage,
+        target: TranslationLanguage,
+        mode: TranslationApplyMode,
+        segments: List<SubtitleSegment>
+    ) {
+        val session = activeVideoEditor ?: return
+        if (segments.isEmpty()) return
+        viewModelScope.launch {
+            busy = true
+            progress = 0f
+            statusText = "正在准备本地字幕翻译..."
+            runCatching {
+                translationEngine.translateLines(source, target, segments.map { it.text }) { value ->
+                    progress = value
+                    statusText = "正在本地翻译字幕 ${(value * 100).toInt()}%"
+                }
+            }.onSuccess { translatedLines ->
+                val translatedSegments = segments.zip(translatedLines).map { (segment, result) ->
+                    segment.copy(text = result.translatedText.ifBlank { result.sourceText })
+                }
+                val displayMode = when (mode) {
+                    TranslationApplyMode.TranslationOnly -> SubtitleDisplayMode.Translation
+                    TranslationApplyMode.Bilingual -> SubtitleDisplayMode.Bilingual
+                }
+                val translatedText = translatedSegments.joinToString("\n") { it.text }.trim()
+                val existing = records.value.firstOrNull { it.id == session.recordId }
+                app.repository.update(
+                    existing?.copy(
+                        translatedText = translatedText,
+                        translatedSegmentsJson = translatedSegments.toJsonString(),
+                        subtitleDisplayMode = displayMode.name,
+                        message = ""
+                    ) ?: ConversionRecord(
+                        id = session.recordId,
+                        type = ConversionType.Video,
+                        title = session.title,
+                        sourceUri = session.videoUri.toString(),
+                        resultText = segments.joinToString("\n") { it.text }.trim(),
+                        segmentsJson = segments.toJsonString(),
+                        translatedText = translatedText,
+                        translatedSegmentsJson = translatedSegments.toJsonString(),
+                        subtitleDisplayMode = displayMode.name,
+                        status = ConversionStatus.Success
+                    )
+                )
+                activeVideoEditor = session.copy(
+                    segments = segments,
+                    translatedSegments = translatedSegments,
+                    subtitleDisplayMode = displayMode
+                )
+                currentText = translatedText
+                statusText = "字幕本地翻译完成：${source.label} -> ${target.label}"
+                progress = 1f
+            }.onFailure { error ->
+                refreshTranslationStatus()
+                statusText = "字幕翻译不可用：${error.message ?: "未知错误"}"
+            }
+            busy = false
         }
     }
 
@@ -428,13 +518,21 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             activeVideoEditor = session.copy(
                 title = title,
                 videoUri = uri,
-                segments = segments
+                segments = segments,
+                translatedSegments = emptyList(),
+                subtitleDisplayMode = SubtitleDisplayMode.Original
             )
         }
     }
 
     private suspend fun updateVideoSession(session: VideoEditSession, segments: List<SubtitleSegment>) {
         val editedText = segments.joinToString("\n") { it.text }.trim()
+        val alignedTranslatedSegments = alignTranslatedSegments(segments, session.translatedSegments)
+        val displayMode = if (alignedTranslatedSegments.isEmpty()) {
+            SubtitleDisplayMode.Original
+        } else {
+            session.subtitleDisplayMode
+        }
         val existing = records.value.firstOrNull { it.id == session.recordId }
         currentText = editedText
         statusText = "字幕修改已保存"
@@ -444,6 +542,9 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                 sourceUri = session.videoUri.toString(),
                 resultText = editedText,
                 segmentsJson = segments.toJsonString(),
+                translatedText = alignedTranslatedSegments.joinToString("\n") { it.text }.trim(),
+                translatedSegmentsJson = alignedTranslatedSegments.toJsonString(),
+                subtitleDisplayMode = displayMode.name,
                 status = ConversionStatus.Success,
                 message = ""
             ) ?: ConversionRecord(
@@ -453,6 +554,9 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                 sourceUri = session.videoUri.toString(),
                 resultText = editedText,
                 segmentsJson = segments.toJsonString(),
+                translatedText = alignedTranslatedSegments.joinToString("\n") { it.text }.trim(),
+                translatedSegmentsJson = alignedTranslatedSegments.toJsonString(),
+                subtitleDisplayMode = displayMode.name,
                 status = ConversionStatus.Success
             )
         )
@@ -482,10 +586,12 @@ fun ConverterApp(
         VideoSubtitleEditorScreen(
             session = editorSession,
             videoRecords = videoRecords,
+            translationStatus = viewModel.translationStatus,
             onClose = viewModel::closeVideoEditor,
             onSave = viewModel::saveVideoSubtitles,
             onReplaceVideo = viewModel::replaceVideoEditorUri,
-            onSwitchVideo = viewModel::switchVideoEditor
+            onSwitchVideo = viewModel::switchVideoEditor,
+            onTranslate = viewModel::translateVideoSubtitles
         )
         return
     }
@@ -1027,6 +1133,10 @@ fun AboutDialog(onDismiss: () -> Unit) {
                     body = "用于本地离线语音识别。项目内置模型由 SenseVoice / FunASR 相关模型转换得到，遵循 FunASR Model Open Source License Agreement 1.1。二次分发或商业化时应注明来源和作者信息，并保留相关模型名称。"
                 )
                 NoticeSection(
+                    title = "OPUS-MT / Marian 本地翻译模型",
+                    body = "fullOffline 版预留英文、中文、日文、韩文互译模型目录。实际内置权重应保留模型来源、许可证和署名信息；推荐使用 CC-BY 4.0 兼容模型，避免带非商业限制的模型进入商业版本。"
+                )
+                NoticeSection(
                     title = "Google ML Kit Text Recognition",
                     body = "用于图片 OCR。ML Kit 对输入数据的处理在设备端完成，但可能联系 Google 服务器获取修复、模型更新、硬件兼容信息，也可能发送 API 性能和使用指标。"
                 )
@@ -1151,16 +1261,20 @@ fun TextNoteScreen(
 fun VideoSubtitleEditorScreen(
     session: VideoEditSession,
     videoRecords: List<ConversionRecord>,
+    translationStatus: TranslationModelStatus,
     onClose: () -> Unit,
     onSave: (List<SubtitleSegment>) -> Unit,
     onReplaceVideo: (Uri, List<SubtitleSegment>) -> Unit,
-    onSwitchVideo: (ConversionRecord, List<SubtitleSegment>?) -> Unit
+    onSwitchVideo: (ConversionRecord, List<SubtitleSegment>?) -> Unit,
+    onTranslate: (TranslationLanguage, TranslationLanguage, TranslationApplyMode, List<SubtitleSegment>) -> Unit
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val activity = context as? Activity
     val clipboard = LocalClipboardManager.current
     var segments by remember(session.recordId, session.segments) { mutableStateOf(session.segments) }
+    var translatedSegments by remember(session.recordId, session.translatedSegments) { mutableStateOf(session.translatedSegments) }
+    var subtitleDisplayMode by remember(session.recordId, session.subtitleDisplayMode) { mutableStateOf(session.subtitleDisplayMode) }
     var selectedId by remember(session.recordId) { mutableStateOf(session.segments.firstOrNull()?.id) }
     var positionMs by remember { mutableIntStateOf(0) }
     var durationMs by remember { mutableIntStateOf(0) }
@@ -1175,6 +1289,7 @@ fun VideoSubtitleEditorScreen(
     var showPlayerControls by remember { mutableStateOf(true) }
     var subtitlesVisible by remember { mutableStateOf(true) }
     var showVideoHistory by remember { mutableStateOf(false) }
+    var showTranslationDialog by remember { mutableStateOf(false) }
     var pendingSwitchRecord by remember { mutableStateOf<ConversionRecord?>(null) }
     var orientationMode by remember { mutableStateOf(VideoOrientationMode.Auto) }
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -1191,6 +1306,16 @@ fun VideoSubtitleEditorScreen(
     val activeSegment = segments.firstOrNull { segment ->
         positionMs.toLong() >= segment.startMs && positionMs.toLong() < segment.endMs
     }
+    val activeTranslatedSegment = activeSegment?.let { active ->
+        translatedSegments.firstOrNull { it.id == active.id }
+    } ?: translatedSegments.firstOrNull { segment ->
+        positionMs.toLong() >= segment.startMs && positionMs.toLong() < segment.endMs
+    }
+    val activeSubtitleText = displaySubtitleText(
+        original = activeSegment,
+        translated = activeTranslatedSegment,
+        mode = subtitleDisplayMode
+    )
     val fullText = segments.joinToString("\n") { it.text }.trim()
     val hasUnsavedChanges = remember(segments, session.segments) {
         segments.toJsonString() != session.segments.toJsonString()
@@ -1386,6 +1511,9 @@ fun VideoSubtitleEditorScreen(
                     }) {
                         Icon(Icons.Default.Share, contentDescription = "分享", tint = Color.White)
                     }
+                    TextButton(onClick = { showTranslationDialog = true }) {
+                        Text("翻译字幕", color = Color.White)
+                    }
                     Button(onClick = { onSave(segments) }) {
                         Icon(Icons.Default.Check, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
@@ -1456,10 +1584,19 @@ fun VideoSubtitleEditorScreen(
                     IconButton(onClick = { showVideoHistory = true }) {
                         Icon(Icons.Default.History, contentDescription = "历史视频", tint = Color.White)
                     }
-                    IconButton(onClick = { subtitlesVisible = !subtitlesVisible }) {
+                    IconButton(
+                        onClick = {
+                            if (translatedSegments.isEmpty()) {
+                                subtitlesVisible = !subtitlesVisible
+                            } else {
+                                subtitlesVisible = true
+                                subtitleDisplayMode = subtitleDisplayMode.next()
+                            }
+                        }
+                    ) {
                         Icon(
                             Icons.Default.Subtitles,
-                            contentDescription = "字幕开关",
+                            contentDescription = "字幕模式",
                             tint = if (subtitlesVisible) Color.White else Color(0xFF777777)
                         )
                     }
@@ -1495,9 +1632,9 @@ fun VideoSubtitleEditorScreen(
                 }
             }
 
-            if (subtitlesVisible && activeSegment != null) {
+            if (subtitlesVisible && activeSubtitleText.isNotBlank()) {
                 Text(
-                    activeSegment.text,
+                    activeSubtitleText,
                     color = Color.White,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold,
@@ -1745,6 +1882,89 @@ fun VideoSubtitleEditorScreen(
             }
         )
     }
+
+    if (showTranslationDialog) {
+        SubtitleTranslationDialog(
+            status = translationStatus,
+            onDismiss = { showTranslationDialog = false },
+            onTranslate = { source, target, mode ->
+                showTranslationDialog = false
+                onTranslate(source, target, mode, segments)
+            }
+        )
+    }
+}
+
+@Composable
+fun SubtitleTranslationDialog(
+    status: TranslationModelStatus,
+    onDismiss: () -> Unit,
+    onTranslate: (TranslationLanguage, TranslationLanguage, TranslationApplyMode) -> Unit
+) {
+    var source by remember { mutableStateOf(TranslationLanguage.English) }
+    var target by remember { mutableStateOf(TranslationLanguage.Chinese) }
+    var mode by remember { mutableStateOf(TranslationApplyMode.Bilingual) }
+    val statusText = when {
+        !status.fullOfflineBuild -> "当前是标准版，请打包 fullOffline 版并内置翻译模型。"
+        status.ready -> "内置翻译模型已完整。"
+        else -> "缺少模型：${status.missingDirections.joinToString("、")}"
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("翻译字幕") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(statusText, color = if (status.ready) Color(0xFF0F766E) else Color(0xFFB45309), style = MaterialTheme.typography.bodySmall)
+                Text("原语言", fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    TranslationLanguage.entries.forEach { language ->
+                        FilterChip(
+                            selected = source == language,
+                            onClick = {
+                                source = language
+                                if (target == language) target = TranslationLanguage.Chinese.takeIf { it != language } ?: TranslationLanguage.English
+                            },
+                            label = { Text(language.label) }
+                        )
+                    }
+                }
+                Text("目标语言", fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    TranslationLanguage.entries.forEach { language ->
+                        FilterChip(
+                            selected = target == language,
+                            onClick = { target = language },
+                            label = { Text(language.label) }
+                        )
+                    }
+                }
+                Text("显示方式", fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    TranslationApplyMode.entries.forEach { item ->
+                        FilterChip(
+                            selected = mode == item,
+                            onClick = { mode = item },
+                            label = { Text(item.label) }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = source != target,
+                onClick = { onTranslate(source, target, mode) }
+            ) {
+                Text("开始翻译")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }
 
 @Composable
@@ -2213,18 +2433,57 @@ private fun ConversionRecord.toVideoEditSession(): VideoEditSession? {
     if (!isOpenableVideoRecord()) return null
     val segments = segmentsJson.toSubtitleSegments()
         .ifEmpty { buildSubtitleSegments(resultText, 0L) }
+    val translatedSegments = translatedSegmentsJson.toSubtitleSegments()
+        .ifEmpty { buildSubtitleSegments(translatedText, 0L) }
     if (segments.isEmpty()) return null
     return VideoEditSession(
         recordId = id,
         title = title,
         videoUri = Uri.parse(sourceUri),
-        segments = segments
+        segments = segments,
+        translatedSegments = translatedSegments,
+        subtitleDisplayMode = runCatching { SubtitleDisplayMode.valueOf(subtitleDisplayMode) }
+            .getOrDefault(if (translatedSegments.isNotEmpty()) SubtitleDisplayMode.Translation else SubtitleDisplayMode.Original)
     )
 }
 
 private fun ConversionRecord.subtitleSegmentCount(): Int =
     segmentsJson.toSubtitleSegments().size.takeIf { it > 0 }
         ?: buildSubtitleSegments(resultText, 0L).size
+
+private fun SubtitleDisplayMode.next(): SubtitleDisplayMode = when (this) {
+    SubtitleDisplayMode.Original -> SubtitleDisplayMode.Translation
+    SubtitleDisplayMode.Translation -> SubtitleDisplayMode.Bilingual
+    SubtitleDisplayMode.Bilingual -> SubtitleDisplayMode.Original
+}
+
+private fun displaySubtitleText(
+    original: SubtitleSegment?,
+    translated: SubtitleSegment?,
+    mode: SubtitleDisplayMode
+): String = when (mode) {
+    SubtitleDisplayMode.Original -> original?.text.orEmpty()
+    SubtitleDisplayMode.Translation -> translated?.text ?: original?.text.orEmpty()
+    SubtitleDisplayMode.Bilingual -> listOfNotNull(original?.text, translated?.text)
+        .distinct()
+        .joinToString("\n")
+}
+
+private fun alignTranslatedSegments(
+    segments: List<SubtitleSegment>,
+    translatedSegments: List<SubtitleSegment>
+): List<SubtitleSegment> {
+    if (segments.isEmpty() || translatedSegments.isEmpty()) return emptyList()
+    val translatedById = translatedSegments.associateBy { it.id }
+    return segments.mapIndexedNotNull { index, segment ->
+        val translated = translatedById[segment.id] ?: translatedSegments.getOrNull(index)
+        translated?.copy(
+            id = segment.id,
+            startMs = segment.startMs,
+            endMs = segment.endMs
+        )
+    }
+}
 
 private fun joinRecognizedChunks(chunks: List<SpeechTranscriptChunk>, language: SpeechLanguage): String {
     val separator = when (language) {

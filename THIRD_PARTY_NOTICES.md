@@ -50,6 +50,17 @@
 - 条款与隐私：https://developers.google.com/ml-kit/terms
 - 注意：Google ML Kit 文档说明，ML Kit API 对输入数据的处理在设备端完成，不会把输入和输出发送给 Google；但 ML Kit API 可能联系 Google 服务器获取修复、模型更新和硬件兼容信息，也可能发送 API 性能和使用指标。发布应用时，应在隐私政策和应用市场数据披露中说明。
 
+## 本地字幕翻译
+
+### OPUS-MT / Marian translation models
+
+- 用途：`fullOffline` 版本预留的本地字幕翻译模型，用于英文、中文、日文、韩文之间互译。
+- 文件：`app/src/fullOffline/assets/translation-models/`
+- 推荐模型来源：https://github.com/Helsinki-NLP/OPUS-MT-train
+- 常见模型仓库：https://huggingface.co/Helsinki-NLP
+- 常见许可证：CC-BY 4.0，具体以每个模型目录内的 `license.txt` 和上游模型页为准。
+- 注意：当前源码仓库只提交模型目录规范和占位清单，没有提交真实翻译权重。正式内置、二次分发或商业化前，应在每个方向目录放入 `license.txt`，记录模型名称、来源链接、许可证、转换/量化方式和修改日期；不要使用带非商业限制或来源不清的模型进入商业版本。
+
 ## Android 与 Kotlin 依赖
 
 ### AndroidX / Jetpack Compose

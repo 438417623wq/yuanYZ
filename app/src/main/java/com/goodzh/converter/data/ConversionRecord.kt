@@ -19,6 +19,9 @@ data class ConversionRecord(
     val sourceUri: String,
     val resultText: String,
     val segmentsJson: String = "",
+    val translatedText: String = "",
+    val translatedSegmentsJson: String = "",
+    val subtitleDisplayMode: String = "Original",
     val status: ConversionStatus,
     val message: String = "",
     val createdAt: Long = System.currentTimeMillis()

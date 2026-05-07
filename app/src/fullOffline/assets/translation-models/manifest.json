@@ -1,0 +1,55 @@
+{
+  "pack": "goodzh-full-offline-translation",
+  "version": "1.0",
+  "engine": "onnx-marian-int8",
+  "directions": [
+    {
+      "id": "en-zh",
+      "name": "英文转中文",
+      "source": "en",
+      "target": "zh",
+      "license": "CC-BY 4.0",
+      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+    },
+    {
+      "id": "zh-en",
+      "name": "中文转英文",
+      "source": "zh",
+      "target": "en",
+      "license": "CC-BY 4.0",
+      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+    },
+    {
+      "id": "ja-zh",
+      "name": "日文转中文",
+      "source": "ja",
+      "target": "zh",
+      "license": "CC-BY 4.0",
+      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+    },
+    {
+      "id": "zh-ja",
+      "name": "中文转日文",
+      "source": "zh",
+      "target": "ja",
+      "license": "CC-BY 4.0",
+      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+    },
+    {
+      "id": "ko-zh",
+      "name": "韩文转中文",
+      "source": "ko",
+      "target": "zh",
+      "license": "CC-BY 4.0",
+      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+    },
+    {
+      "id": "zh-ko",
+      "name": "中文转韩文",
+      "source": "zh",
+      "target": "ko",
+      "license": "CC-BY 4.0",
+      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+    }
+  ]
+}

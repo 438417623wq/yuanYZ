@@ -18,11 +18,26 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    flavorDimensions += "edition"
+    productFlavors {
+        create("standard") {
+            dimension = "edition"
+            buildConfigField("Boolean", "FULL_OFFLINE_TRANSLATION", "false")
+            resValue("string", "edition_name", "标准版")
+        }
+        create("fullOffline") {
+            dimension = "edition"
+            buildConfigField("Boolean", "FULL_OFFLINE_TRANSLATION", "true")
+            resValue("string", "edition_name", "全离线翻译版")
+        }
     }
 }
 
@@ -53,4 +68,33 @@ dependencies {
     implementation("com.alphacephei:vosk-android:0.3.47")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+}
+
+tasks.register("checkFullOfflineTranslationModels") {
+    group = "verification"
+    description = "Checks whether the fullOffline flavor contains all required local translation model files."
+    doLast {
+        val root = project.file("src/fullOffline/assets/translation-models")
+        val directions = listOf("en-zh", "zh-en", "ja-zh", "zh-ja", "ko-zh", "zh-ko")
+        val modelFileNames = listOf("model.onnx", "model.int8.onnx", "model.ort", "model.bin")
+        val missing = directions.flatMap { direction ->
+            val dir = root.resolve(direction)
+            val requiredMissing = listOf("manifest.json", "tokenizer.json", "license.txt")
+                .filterNot { dir.resolve(it).isFile }
+                .map { "$direction/$it" }
+            val modelMissing = if (modelFileNames.any { dir.resolve(it).isFile }) {
+                emptyList()
+            } else {
+                listOf("$direction/model.onnx or model.int8.onnx")
+            }
+            requiredMissing + modelMissing
+        }
+        if (missing.isEmpty()) {
+            println("All fullOffline translation models are present.")
+        } else {
+            println("Missing fullOffline translation model files:")
+            missing.forEach { println("- $it") }
+            println("Use Git LFS or GitHub Releases for these large files.")
+        }
+    }
 }

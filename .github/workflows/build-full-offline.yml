@@ -1,0 +1,36 @@
+name: Build Android APKs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Check full offline translation models
+        run: ./gradlew :app:checkFullOfflineTranslationModels
+
+      - name: Build standard debug
+        run: ./gradlew :app:assembleStandardDebug
+
+      - name: Build full offline debug
+        run: ./gradlew :app:assembleFullOfflineDebug
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: goodzh-apks
+          path: app/build/outputs/apk/**/*.apk

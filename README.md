@@ -26,14 +26,41 @@
 4. 运行 `app` 模块，或执行：
 
 ```powershell
-.\gradlew assembleDebug
+.\gradlew :app:assembleStandardDebug
+```
+
+## 全离线翻译版
+
+项目已预留 `fullOffline` 构建版本，用于把英文、中文、日文、韩文互译模型全部内置进 APK。
+
+需要的模型方向：
+
+- `en-zh`
+- `zh-en`
+- `ja-zh`
+- `zh-ja`
+- `ko-zh`
+- `zh-ko`
+
+模型目录规范见 [`docs/full-offline-translation.md`](docs/full-offline-translation.md)。
+
+检查模型文件：
+
+```powershell
+.\gradlew :app:checkFullOfflineTranslationModels
+```
+
+打包全离线版：
+
+```powershell
+.\gradlew :app:assembleFullOfflineDebug
 ```
 
 ## 大文件说明
 
 本项目包含本地语音识别模型和 AAR 二进制依赖，已通过 Git LFS 配置管理。APK、构建产物、临时下载包和崩溃日志不会提交到源码仓库。
 
-如果要发布可安装包，建议在 GitHub 的 Releases 页面上传 APK，而不是把 APK 放进 Git 提交历史。
+如果要发布可安装包，建议在 GitHub 的 Releases 页面上传 APK，而不是把 APK 放进 Git 提交历史。全离线翻译模型文件应使用 Git LFS 或 Release 附件管理。
 
 ## 许可证与第三方声明
 

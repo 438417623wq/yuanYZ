@@ -59,6 +59,9 @@ private fun List<ConversionRecord>.toJson(): JSONArray {
                 .put("sourceUri", record.sourceUri)
                 .put("resultText", record.resultText)
                 .put("segmentsJson", record.segmentsJson)
+                .put("translatedText", record.translatedText)
+                .put("translatedSegmentsJson", record.translatedSegmentsJson)
+                .put("subtitleDisplayMode", record.subtitleDisplayMode)
                 .put("status", record.status.name)
                 .put("message", record.message)
                 .put("createdAt", record.createdAt)
@@ -75,6 +78,9 @@ private fun JSONObject.toRecord(): ConversionRecord =
         sourceUri = optString("sourceUri", ""),
         resultText = optString("resultText", ""),
         segmentsJson = optString("segmentsJson", ""),
+        translatedText = optString("translatedText", ""),
+        translatedSegmentsJson = optString("translatedSegmentsJson", ""),
+        subtitleDisplayMode = optString("subtitleDisplayMode", "Original"),
         status = ConversionStatus.valueOf(optString("status", ConversionStatus.Success.name)),
         message = optString("message", ""),
         createdAt = optLong("createdAt", System.currentTimeMillis())
