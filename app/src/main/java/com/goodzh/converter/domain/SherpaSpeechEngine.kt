@@ -13,6 +13,12 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.ceil
 
+data class SpeechTranscriptChunk(
+    val startMs: Long,
+    val endMs: Long,
+    val text: String
+)
+
 class SherpaSpeechEngine(private val context: Context) {
     fun isBundledModelReady(): Boolean = runCatching {
         context.assets.open("$assetRoot/model.int8.onnx").close()
@@ -25,14 +31,33 @@ class SherpaSpeechEngine(private val context: Context) {
         language: SpeechLanguage,
         profile: PerformanceProfile,
         onProgress: (Float) -> Unit
-    ): String = withContext(Dispatchers.IO) {
+    ): String {
+        val chunks = transcribeChunks(wavFile, language, profile, onProgress)
+        val separator = when (language) {
+            SpeechLanguage.English,
+            SpeechLanguage.OtherDialect -> " "
+            SpeechLanguage.Mandarin,
+            SpeechLanguage.Japanese,
+            SpeechLanguage.Korean,
+            SpeechLanguage.Cantonese -> ""
+        }
+        return chunks.joinToString(separator) { it.text }
+    }
+
+    suspend fun transcribeChunks(
+        wavFile: File,
+        language: SpeechLanguage,
+        profile: PerformanceProfile,
+        onProgress: (Float) -> Unit
+    ): List<SpeechTranscriptChunk> = withContext(Dispatchers.IO) {
         val recognizer = createRecognizer(language.modelCode, profile.speechThreads)
         try {
-            val parts = ArrayList<String>()
+            val chunks = ArrayList<SpeechTranscriptChunk>()
             val dataBytes = (wavFile.length() - 44L).coerceAtLeast(0L)
-            if (dataBytes == 0L) return@withContext ""
+            if (dataBytes == 0L) return@withContext emptyList()
 
-            val chunkBytes = profile.speechChunkSeconds.coerceAtLeast(5) * 16_000 * 2
+            val bytesPerSecond = sampleRate * bytesPerSample
+            val chunkBytes = profile.speechChunkSeconds.coerceAtLeast(5) * bytesPerSecond
             val totalChunks = ceil(dataBytes.toDouble() / chunkBytes).toInt().coerceAtLeast(1)
             wavFile.inputStream().buffered().use { input ->
                 if (input.skip(44) < 44) error("音频文件格式错误")
@@ -42,6 +67,7 @@ class SherpaSpeechEngine(private val context: Context) {
                 while (true) {
                     val read = input.read(buffer)
                     if (read <= 0) break
+                    val chunkStartBytes = readBytes
                     readBytes += read
                     chunkIndex += 1
                     val samples = pcm16BytesToFloat(buffer, read)
@@ -51,7 +77,15 @@ class SherpaSpeechEngine(private val context: Context) {
                             stream.acceptWaveform(samples, 16_000)
                             recognizer.decode(stream)
                             val text = recognizer.getResult(stream).text.cleanupSenseVoiceText()
-                            if (text.isNotBlank()) parts.add(text)
+                            if (text.isNotBlank()) {
+                                chunks.add(
+                                    SpeechTranscriptChunk(
+                                        startMs = pcmBytesToMs(chunkStartBytes),
+                                        endMs = pcmBytesToMs(readBytes).coerceAtLeast(pcmBytesToMs(chunkStartBytes) + 500L),
+                                        text = text
+                                    )
+                                )
+                            }
                         } finally {
                             stream.release()
                         }
@@ -61,15 +95,7 @@ class SherpaSpeechEngine(private val context: Context) {
                     onProgress(0.95f + (maxOf(chunkProgress, byteProgress) * 0.05f).coerceIn(0f, 0.05f))
                 }
             }
-            val separator = when (language) {
-                SpeechLanguage.English,
-                SpeechLanguage.OtherDialect -> " "
-                SpeechLanguage.Mandarin,
-                SpeechLanguage.Japanese,
-                SpeechLanguage.Korean,
-                SpeechLanguage.Cantonese -> ""
-            }
-            parts.joinToString(separator)
+            chunks
         } finally {
             recognizer.release()
         }
@@ -95,8 +121,13 @@ class SherpaSpeechEngine(private val context: Context) {
 
     companion object {
         private const val assetRoot = "sherpa-models/sense-voice"
+        private const val sampleRate = 16_000
+        private const val bytesPerSample = 2
     }
 }
+
+private fun pcmBytesToMs(bytes: Long): Long =
+    bytes * 1_000L / (16_000L * 2L)
 
 private fun pcm16BytesToFloat(bytes: ByteArray, read: Int): FloatArray {
     val usable = read - (read % 2)

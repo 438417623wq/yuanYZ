@@ -8,7 +8,9 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.os.Build
 import android.net.Uri
 import android.os.Bundle
 import android.speech.RecognitionListener
@@ -21,6 +23,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -96,8 +99,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -122,6 +129,7 @@ import com.goodzh.converter.domain.ModelManager
 import com.goodzh.converter.domain.OcrConverter
 import com.goodzh.converter.domain.PerformanceMode
 import com.goodzh.converter.domain.SpeechLanguage
+import com.goodzh.converter.domain.SpeechTranscriptChunk
 import com.goodzh.converter.domain.SherpaSpeechEngine
 import com.goodzh.converter.domain.VideoAudioExtractor
 import com.goodzh.converter.domain.displayName
@@ -131,11 +139,13 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -288,15 +298,17 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                     statusText = "正在本地提取音频 ${(value * 100).toInt()}%"
                 }
                 statusText = "正在识别${language.label}：${performanceMode.label}模式"
-                val text = sherpaEngine.transcribe(wav, language, profile) { value ->
+                val chunks = sherpaEngine.transcribeChunks(wav, language, profile) { value ->
                     progress = value
                     statusText = "正在识别${language.label} ${(value * 100).toInt()}%"
                 }
-                val finalText = normalizeRecognizedText(text, language)
+                val finalText = joinRecognizedChunks(chunks, language)
                     .ifBlank { "未识别到语音文字" }
                 val durationMs = videoDurationMs(getApplication(), uri)
                 wav.delete()
-                finalText to buildSubtitleSegments(finalText, durationMs)
+                val segments = buildSubtitleSegmentsFromChunks(chunks, language, durationMs)
+                    .ifEmpty { buildSubtitleSegments(finalText, durationMs) }
+                finalText to segments
             }.onSuccess { result ->
                 val (text, segments) = result
                 currentText = text
@@ -1087,7 +1099,9 @@ fun VideoSubtitleEditorScreen(
     }
 
     val selectedSegment = segments.firstOrNull { it.id == selectedId } ?: segments.firstOrNull()
-    val activeSegment = segments.lastOrNull { positionMs.toLong() >= it.startMs } ?: segments.firstOrNull()
+    val activeSegment = segments.firstOrNull { segment ->
+        positionMs.toLong() >= segment.startMs && positionMs.toLong() < segment.endMs
+    }
     val fullText = segments.joinToString("\n") { it.text }.trim()
     val hasUnsavedChanges = remember(segments, session.segments) {
         segments.toJsonString() != session.segments.toJsonString()
@@ -1420,6 +1434,12 @@ fun VideoSubtitleEditorScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("批量编辑", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { segments = segments.shiftedBy(-500L) }) {
+                        Text("提前0.5秒", color = Color.White)
+                    }
+                    TextButton(onClick = { segments = segments.shiftedBy(500L) }) {
+                        Text("延后0.5秒", color = Color.White)
+                    }
                     Text("${segments.size} 段", color = Color(0xFFBDBDBD))
                 }
                 Spacer(Modifier.height(8.dp))
@@ -1613,9 +1633,18 @@ fun FullScreenVideoHistoryItem(
     isCurrent: Boolean,
     onClick: () -> Unit
 ) {
+    val context = LocalContext.current
+    var thumbnail by remember(record.sourceUri) { mutableStateOf<ImageBitmap?>(null) }
     val segmentCount = remember(record.segmentsJson, record.resultText) {
         record.subtitleSegmentCount()
     }
+
+    LaunchedEffect(record.sourceUri) {
+        thumbnail = withContext(Dispatchers.IO) {
+            loadVideoThumbnail(context, Uri.parse(record.sourceUri))?.asImageBitmap()
+        }
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1629,7 +1658,26 @@ fun FullScreenVideoHistoryItem(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Icon(Icons.Default.Videocam, contentDescription = null, tint = Color(0xFF9FE7DC), modifier = Modifier.size(22.dp))
+        Box(
+            modifier = Modifier
+                .width(76.dp)
+                .height(44.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFF171717)),
+            contentAlignment = Alignment.Center
+        ) {
+            val image = thumbnail
+            if (image != null) {
+                Image(
+                    bitmap = image,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(Icons.Default.Videocam, contentDescription = null, tint = Color(0xFF9FE7DC), modifier = Modifier.size(22.dp))
+            }
+        }
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(record.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
             Text("${timeLabel(record.createdAt)} · ${segmentCount}段字幕", color = Color(0xFFBDBDBD), style = MaterialTheme.typography.bodySmall)
@@ -1958,6 +2006,77 @@ private fun ConversionRecord.toVideoEditSession(): VideoEditSession? {
 private fun ConversionRecord.subtitleSegmentCount(): Int =
     segmentsJson.toSubtitleSegments().size.takeIf { it > 0 }
         ?: buildSubtitleSegments(resultText, 0L).size
+
+private fun joinRecognizedChunks(chunks: List<SpeechTranscriptChunk>, language: SpeechLanguage): String {
+    val separator = when (language) {
+        SpeechLanguage.English,
+        SpeechLanguage.OtherDialect -> " "
+        SpeechLanguage.Mandarin,
+        SpeechLanguage.Japanese,
+        SpeechLanguage.Korean,
+        SpeechLanguage.Cantonese -> ""
+    }
+    return chunks
+        .map { normalizeRecognizedText(it.text, language) }
+        .filter { it.isNotBlank() }
+        .joinToString(separator)
+        .trim()
+}
+
+private fun buildSubtitleSegmentsFromChunks(
+    chunks: List<SpeechTranscriptChunk>,
+    language: SpeechLanguage,
+    durationMs: Long
+): List<SubtitleSegment> {
+    val segments = ArrayList<SubtitleSegment>()
+    var nextId = System.currentTimeMillis()
+    chunks.forEach { chunk ->
+        val text = normalizeRecognizedText(chunk.text, language)
+        if (text.isBlank()) return@forEach
+
+        val chunkStart = chunk.startMs.coerceAtLeast(0L)
+        val rawEnd = chunk.endMs.coerceAtLeast(chunkStart + 800L)
+        val chunkEnd = if (durationMs > 0L) rawEnd.coerceAtMost(durationMs) else rawEnd
+        if (chunkEnd <= chunkStart) return@forEach
+
+        val localSegments = buildSubtitleSegments(text, chunkEnd - chunkStart)
+        localSegments.forEach { segment ->
+            val start = (chunkStart + segment.startMs).coerceAtLeast(chunkStart)
+            val maxEnd = chunkEnd.coerceAtLeast(start + 1L)
+            val end = (chunkStart + segment.endMs).coerceIn(start + 1L, maxEnd)
+            segments.add(
+                segment.copy(
+                    id = nextId++,
+                    startMs = start,
+                    endMs = end
+                )
+            )
+        }
+    }
+    return segments.sortedBy { it.startMs }
+}
+
+private fun List<SubtitleSegment>.shiftedBy(deltaMs: Long): List<SubtitleSegment> =
+    map { segment ->
+        val start = (segment.startMs + deltaMs).coerceAtLeast(0L)
+        val end = (segment.endMs + deltaMs).coerceAtLeast(start + 300L)
+        segment.copy(startMs = start, endMs = end)
+    }
+
+private fun loadVideoThumbnail(context: Context, uri: Uri): Bitmap? =
+    runCatching {
+        MediaMetadataRetriever().use { retriever ->
+            retriever.setDataSource(context, uri)
+            val frame = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                retriever.getScaledFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 152, 88)
+            } else {
+                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } ?: return@runCatching null
+            val scaled = Bitmap.createScaledBitmap(frame, 152, 88, true)
+            if (scaled != frame) frame.recycle()
+            scaled
+        }
+    }.getOrNull()
 
 private fun buildSubtitleSegments(text: String, durationMs: Long): List<SubtitleSegment> {
     val sentences = text
