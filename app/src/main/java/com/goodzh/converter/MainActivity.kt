@@ -82,6 +82,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -667,8 +668,14 @@ fun ConverterApp(
 fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    var liveSpeech by remember { mutableStateOf("") }
+    var liveSpeechDraft by remember { mutableStateOf("") }
+    var liveSpeechPartial by remember { mutableStateOf("") }
+    var liveSpeechNotice by remember { mutableStateOf<String?>(null) }
+    var liveSpeechActive by remember { mutableStateOf(false) }
     var listening by remember { mutableStateOf(false) }
+    var speechPaused by remember { mutableStateOf(false) }
+    var continuousSpeech by remember { mutableStateOf(true) }
+    var speechRestartTick by remember { mutableIntStateOf(0) }
     var showAudioActionDialog by remember { mutableStateOf(false) }
     var pendingVideoUri by remember { mutableStateOf<Uri?>(null) }
     var pendingAudioUri by remember { mutableStateOf<Uri?>(null) }
@@ -692,14 +699,87 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
 
     val recognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) startSpeech(context, recognizer)
+        if (granted) {
+            liveSpeechActive = true
+            speechPaused = false
+            liveSpeechNotice = null
+            liveSpeechPartial = ""
+            runCatching { startSpeech(context, recognizer) }
+                .onFailure {
+                    listening = false
+                    liveSpeechActive = false
+                    liveSpeechNotice = "识别启动失败，请重试"
+                }
+        } else {
+            liveSpeechActive = false
+            speechPaused = false
+            listening = false
+            liveSpeechNotice = "需要录音权限"
+        }
+    }
+    fun startLiveSpeech() {
+        liveSpeechActive = true
+        speechPaused = false
+        liveSpeechNotice = null
+        liveSpeechPartial = ""
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            runCatching { startSpeech(context, recognizer) }
+                .onFailure {
+                    listening = false
+                    liveSpeechActive = false
+                    liveSpeechNotice = "识别启动失败，请重试"
+                }
+        } else {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    fun pauseLiveSpeech() {
+        speechPaused = true
+        liveSpeechActive = true
+        liveSpeechNotice = "已暂停，内容可保存"
+        runCatching { recognizer.stopListening() }
+    }
+
+    fun resumeLiveSpeech() {
+        startLiveSpeech()
+    }
+
+    fun clearLiveSpeech() {
+        liveSpeechDraft = ""
+        liveSpeechPartial = ""
+        liveSpeechNotice = null
+        liveSpeechActive = false
+        speechPaused = false
+        listening = false
+        runCatching { recognizer.cancel() }
+    }
+
+    fun saveLiveSpeech() {
+        val text = buildLiveSpeechPreview(liveSpeechDraft, liveSpeechPartial)
+        if (text.isBlank()) {
+            liveSpeechNotice = "暂无可保存内容"
+            return
+        }
+        viewModel.saveSpeechResult(text)
+        liveSpeechDraft = text
+        liveSpeechPartial = ""
+        liveSpeechNotice = "已保存到历史记录"
+    }
+
+    fun scheduleLiveSpeechRestart() {
+        if (liveSpeechActive && continuousSpeech && !speechPaused) {
+            speechRestartTick++
+        }
     }
 
     DisposableEffect(recognizer) {
         recognizer.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
                 listening = true
-                liveSpeech = ""
+                liveSpeechActive = true
+                liveSpeechNotice = null
+                liveSpeechPartial = ""
             }
 
             override fun onBeginningOfSpeech() = Unit
@@ -711,23 +791,61 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
 
             override fun onError(error: Int) {
                 listening = false
-                liveSpeech = "识别中断，请重试"
+                if (liveSpeechPartial.isNotBlank()) {
+                    liveSpeechDraft = appendRecognizedSpeech(liveSpeechDraft, liveSpeechPartial)
+                    liveSpeechPartial = ""
+                }
+                liveSpeechNotice = if (speechPaused) "已暂停，内容可保存" else recognitionErrorMessage(error)
+                if (continuousSpeech && liveSpeechActive && !speechPaused && error != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                    scheduleLiveSpeechRestart()
+                } else if (!speechPaused) {
+                    liveSpeechActive = false
+                }
             }
 
             override fun onResults(results: Bundle?) {
                 listening = false
                 val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-                liveSpeech = text
-                if (text.isNotBlank()) viewModel.saveSpeechResult(text)
+                val finalText = text.ifBlank { liveSpeechPartial }
+                if (finalText.isNotBlank()) {
+                    liveSpeechDraft = appendRecognizedSpeech(liveSpeechDraft, finalText)
+                }
+                liveSpeechPartial = ""
+                liveSpeechNotice = null
+                if (continuousSpeech && liveSpeechActive && !speechPaused) {
+                    scheduleLiveSpeechRestart()
+                } else if (!speechPaused) {
+                    liveSpeechActive = false
+                }
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
-                liveSpeech = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                liveSpeechPartial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
             }
 
             override fun onEvent(eventType: Int, params: Bundle?) = Unit
         })
         onDispose { recognizer.destroy() }
+    }
+
+    LaunchedEffect(speechRestartTick) {
+        if (speechRestartTick <= 0) return@LaunchedEffect
+        delay(450)
+        if (liveSpeechActive && continuousSpeech && !speechPaused && !listening) {
+            startLiveSpeech()
+        }
+    }
+
+    val liveSpeechPreview = buildLiveSpeechPreview(liveSpeechDraft, liveSpeechPartial)
+    val showLiveSpeechControls = liveSpeechActive || listening || speechPaused || liveSpeechPreview.isNotBlank() || liveSpeechNotice != null
+    val resultText = if (showLiveSpeechControls) liveSpeechPreview else viewModel.currentText
+    val resultStatus = when {
+        showLiveSpeechControls && liveSpeechNotice != null -> liveSpeechNotice.orEmpty()
+        listening -> "正在聆听..."
+        speechPaused -> "实时录音已暂停"
+        liveSpeechActive && continuousSpeech -> "连续录音已开启"
+        liveSpeechActive -> "实时录音待继续"
+        else -> viewModel.statusText
     }
 
     LazyColumn(
@@ -772,22 +890,39 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
                 )
             }
         }
+        if (showLiveSpeechControls) {
+            item {
+                LiveSpeechRecorderCard(
+                    continuous = continuousSpeech,
+                    listening = listening,
+                    paused = speechPaused,
+                    draft = liveSpeechPreview,
+                    notice = liveSpeechNotice,
+                    onContinuousChange = { continuousSpeech = it },
+                    onStart = { startLiveSpeech() },
+                    onPause = { pauseLiveSpeech() },
+                    onResume = { resumeLiveSpeech() },
+                    onSave = { saveLiveSpeech() },
+                    onClear = { clearLiveSpeech() }
+                )
+            }
+        }
         item {
             ResultPanel(
                 busy = viewModel.busy,
                 progress = viewModel.progress,
-                status = if (listening) "正在聆听..." else viewModel.statusText,
-                text = liveSpeech.ifBlank { viewModel.currentText },
+                status = resultStatus,
+                text = resultText,
                 onCopy = {
-                    val text = liveSpeech.ifBlank { viewModel.currentText }
+                    val text = resultText
                     if (text.isNotBlank()) clipboard.setText(AnnotatedString(text))
                 },
                 onShare = {
-                    val text = liveSpeech.ifBlank { viewModel.currentText }
+                    val text = resultText
                     if (text.isNotBlank()) shareText(context, text)
                 },
                 onOpenFull = {
-                    val text = liveSpeech.ifBlank { viewModel.currentText }
+                    val text = resultText
                     viewModel.openCurrentTextNote(text)
                 }
             )
@@ -799,11 +934,7 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
             onDismiss = { showAudioActionDialog = false },
             onLiveSpeech = {
                 showAudioActionDialog = false
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                    startSpeech(context, recognizer)
-                } else {
-                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                }
+                startLiveSpeech()
             },
             onImportAudio = {
                 showAudioActionDialog = false
@@ -859,6 +990,77 @@ fun AudioActionDialog(
             }
         }
     )
+}
+
+@Composable
+fun LiveSpeechRecorderCard(
+    continuous: Boolean,
+    listening: Boolean,
+    paused: Boolean,
+    draft: String,
+    notice: String?,
+    onContinuousChange: (Boolean) -> Unit,
+    onStart: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onSave: () -> Unit,
+    onClear: () -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("实时录音", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        notice ?: when {
+                            listening -> "正在聆听"
+                            paused -> "已暂停"
+                            continuous -> "系统停止后会自动继续"
+                            else -> "单次录音"
+                        },
+                        color = Color(0xFF64748B),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Text("连续录音", color = Color(0xFF334155), style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = continuous, onCheckedChange = onContinuousChange)
+            }
+
+            Text(
+                draft.ifBlank { "识别内容会先保存在这里，点击保存后进入历史记录" },
+                color = if (draft.isBlank()) Color(0xFF94A3B8) else Color(0xFF0F172A),
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                if (paused) {
+                    Button(onClick = onResume, modifier = Modifier.weight(1f)) {
+                        Text("继续")
+                    }
+                } else if (listening) {
+                    Button(onClick = onPause, modifier = Modifier.weight(1f)) {
+                        Text("暂停")
+                    }
+                } else {
+                    Button(onClick = onStart, modifier = Modifier.weight(1f)) {
+                        Text("开始录音")
+                    }
+                }
+                Button(onClick = onSave, enabled = draft.isNotBlank(), modifier = Modifier.weight(1f)) {
+                    Text("保存")
+                }
+                TextButton(onClick = onClear) {
+                    Text("清空")
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1972,6 +2174,9 @@ private fun startSpeech(context: Context, recognizer: SpeechRecognizer) {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.CHINESE.toLanguageTag())
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 15000L)
     }
     recognizer.startListening(intent)
 }
@@ -1982,6 +2187,38 @@ private fun shareText(context: Context, text: String) {
         putExtra(Intent.EXTRA_TEXT, text)
     }
     context.startActivity(Intent.createChooser(intent, "分享文字"))
+}
+
+private fun buildLiveSpeechPreview(draft: String, partial: String): String {
+    val cleanDraft = draft.trim()
+    val cleanPartial = partial.trim()
+    return when {
+        cleanDraft.isBlank() -> cleanPartial
+        cleanPartial.isBlank() -> cleanDraft
+        cleanDraft.lines().lastOrNull()?.trim() == cleanPartial -> cleanDraft
+        else -> "$cleanDraft\n$cleanPartial"
+    }.trim()
+}
+
+private fun appendRecognizedSpeech(current: String, incoming: String): String {
+    val chunk = incoming.trim()
+    if (chunk.isBlank()) return current.trim()
+    val lines = current.lines().map { it.trim() }.filter { it.isNotBlank() }
+    if (lines.lastOrNull() == chunk) return lines.joinToString("\n")
+    return if (lines.isEmpty()) chunk else lines.joinToString("\n") + "\n" + chunk
+}
+
+private fun recognitionErrorMessage(error: Int): String = when (error) {
+    SpeechRecognizer.ERROR_AUDIO -> "录音设备异常"
+    SpeechRecognizer.ERROR_CLIENT -> "录音已停止"
+    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "缺少录音权限"
+    SpeechRecognizer.ERROR_NETWORK -> "网络识别异常"
+    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "网络识别超时"
+    SpeechRecognizer.ERROR_NO_MATCH -> "没有识别到内容"
+    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别器正忙，正在重试"
+    SpeechRecognizer.ERROR_SERVER -> "识别服务异常"
+    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "长时间没有说话"
+    else -> "识别中断，请重试"
 }
 
 private fun ConversionRecord.isOpenableVideoRecord(): Boolean =
