@@ -42,7 +42,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -965,7 +965,7 @@ fun TextNoteScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onClose) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
@@ -1196,7 +1196,7 @@ fun VideoSubtitleEditorScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onClose) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = Color.White)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text("字幕校对", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)

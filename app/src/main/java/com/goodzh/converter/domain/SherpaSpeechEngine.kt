@@ -61,7 +61,15 @@ class SherpaSpeechEngine(private val context: Context) {
                     onProgress(0.95f + (maxOf(chunkProgress, byteProgress) * 0.05f).coerceIn(0f, 0.05f))
                 }
             }
-            parts.joinToString("").ifBlank { parts.joinToString("\n") }
+            val separator = when (language) {
+                SpeechLanguage.English,
+                SpeechLanguage.OtherDialect -> " "
+                SpeechLanguage.Mandarin,
+                SpeechLanguage.Japanese,
+                SpeechLanguage.Korean,
+                SpeechLanguage.Cantonese -> ""
+            }
+            parts.joinToString(separator)
         } finally {
             recognizer.release()
         }
