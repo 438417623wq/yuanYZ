@@ -73,7 +73,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -115,13 +114,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.goodzh.converter.data.ConversionRecord
 import com.goodzh.converter.data.ConversionStatus
 import com.goodzh.converter.data.ConversionType
-import com.goodzh.converter.domain.LocalSpeechEngine
 import com.goodzh.converter.domain.ModelManager
 import com.goodzh.converter.domain.OcrConverter
-import com.goodzh.converter.domain.RecognitionMode
+import com.goodzh.converter.domain.PerformanceMode
+import com.goodzh.converter.domain.SpeechLanguage
 import com.goodzh.converter.domain.SherpaSpeechEngine
 import com.goodzh.converter.domain.VideoAudioExtractor
 import com.goodzh.converter.domain.displayName
+import com.goodzh.converter.domain.profile
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -185,8 +185,8 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
     private val ocr = OcrConverter(application)
     private val modelManager = ModelManager(application)
     private val audioExtractor = VideoAudioExtractor(application)
-    private val speechEngine = LocalSpeechEngine(application)
     private val sherpaEngine = SherpaSpeechEngine(application)
+    private val settings = application.getSharedPreferences("goodzh_settings", Context.MODE_PRIVATE)
 
     val records: StateFlow<List<ConversionRecord>> = app.repository.records.stateIn(
         viewModelScope,
@@ -206,7 +206,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         private set
     var sherpaReady by mutableStateOf(sherpaEngine.isBundledModelReady())
         private set
-    var recognitionMode by mutableStateOf(RecognitionMode.MandarinAccurate)
+    var performanceMode by mutableStateOf(loadPerformanceMode())
         private set
     var activeVideoEditor by mutableStateOf<VideoEditSession?>(null)
         private set
@@ -218,20 +218,22 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             modelReady = modelManager.ensureBundledModelInstalled()
             sherpaReady = sherpaEngine.isBundledModelReady()
             if (sherpaReady) {
-                statusText = "普通话精准模型已内置，可以直接选择视频转换"
-            } else if (modelReady) {
-                statusText = "备用本地模型已就绪，可以选择极速备用模式"
+                statusText = "本地语音模型已内置，可以开始转换"
+            } else {
+                statusText = "本地语音模型缺失，请重新安装新版 APK"
             }
         }
     }
 
-    fun updateRecognitionMode(mode: RecognitionMode) {
-        recognitionMode = mode
-        statusText = when (mode) {
-            RecognitionMode.MandarinAccurate -> "普通话精准：使用 sherpa-onnx SenseVoice 本地模型"
-            RecognitionMode.DialectEnhanced -> "方言增强：自动识别普通话、粤语和中英混合"
-            RecognitionMode.FastFallback -> "极速备用：使用 Vosk 小模型，速度快但准确率较低"
-        }
+    private fun loadPerformanceMode(): PerformanceMode =
+        runCatching {
+            PerformanceMode.valueOf(settings.getString("performance_mode", PerformanceMode.Balanced.name) ?: PerformanceMode.Balanced.name)
+        }.getOrDefault(PerformanceMode.Balanced)
+
+    fun updatePerformanceMode(mode: PerformanceMode) {
+        performanceMode = mode
+        settings.edit().putString("performance_mode", mode.name).apply()
+        statusText = "性能模式已切换为：${mode.label}"
     }
 
     fun importModel(uri: Uri) {
@@ -252,11 +254,11 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun transcribeVideo(uri: Uri) {
+    fun transcribeVideo(uri: Uri, language: SpeechLanguage) {
         viewModelScope.launch {
             val name = displayName(getApplication(), uri)
-            val mode = recognitionMode
-            if (mode != RecognitionMode.FastFallback && !sherpaEngine.isBundledModelReady()) {
+            val profile = performanceMode.profile
+            if (!sherpaEngine.isBundledModelReady()) {
                 sherpaReady = false
                 statusText = "缺少内置精准模型，请重新安装新版 APK"
                 app.repository.save(
@@ -271,21 +273,6 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                 )
                 return@launch
             }
-            if (mode == RecognitionMode.FastFallback && !modelManager.hasModel() && !modelManager.ensureBundledModelInstalled()) {
-                modelReady = false
-                statusText = "缺少备用 Vosk 模型，无法使用极速备用模式"
-                app.repository.save(
-                    ConversionRecord(
-                        type = ConversionType.Video,
-                        title = name,
-                        sourceUri = uri.toString(),
-                        resultText = "",
-                        status = ConversionStatus.Failed,
-                        message = "缺少本地备用模型，未上传云端。"
-                    )
-                )
-                return@launch
-            }
 
             busy = true
             progress = 0f
@@ -296,20 +283,12 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                     progress = value
                     statusText = "正在本地提取音频 ${(value * 100).toInt()}%"
                 }
-                statusText = "正在使用${mode.label}模型识别文字..."
-                val text = if (mode == RecognitionMode.FastFallback) {
-                    speechEngine.transcribe(wav, modelManager.modelDir) { value ->
-                        progress = value
-                        statusText = "正在极速备用识别 ${(value * 100).toInt()}%"
-                    }
-                } else {
-                    sherpaEngine.transcribe(wav, mode) { value ->
-                        progress = value
-                        statusText = "正在${mode.label}识别 ${(value * 100).toInt()}%"
-                    }
+                statusText = "正在识别${language.label}：${performanceMode.label}模式"
+                val text = sherpaEngine.transcribe(wav, language, profile) { value ->
+                    progress = value
+                    statusText = "正在识别${language.label} ${(value * 100).toInt()}%"
                 }
-                val finalText = text
-                    .replace(Regex("\\s+"), "")
+                val finalText = normalizeRecognizedText(text, language)
                     .ifBlank { "未识别到语音文字" }
                 val durationMs = videoDurationMs(getApplication(), uri)
                 wav.delete()
@@ -318,7 +297,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                 val (text, segments) = result
                 currentText = text
                 progress = 1f
-                statusText = "视频本地转文字完成：${mode.label}"
+                statusText = "视频本地转文字完成：${language.label}"
                 val record = ConversionRecord(
                     type = ConversionType.Video,
                     title = name,
@@ -358,7 +337,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             progress = 0f
             statusText = "正在识别图片文字..."
             val name = displayName(getApplication(), uri)
-            runCatching { ocr.recognize(uri) }
+            runCatching { ocr.recognize(uri, performanceMode.profile) }
                 .onSuccess { text ->
                     currentText = text.ifBlank { "未识别到文字" }
                     statusText = "图片识别完成"
@@ -380,21 +359,69 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun importAudio(uri: Uri) {
+    fun transcribeAudio(uri: Uri, language: SpeechLanguage) {
         viewModelScope.launch {
             val name = displayName(getApplication(), uri)
-            currentText = ""
-            statusText = "音频文件已导入。下一步会复用本地模型转写音频。"
-            app.repository.save(
-                ConversionRecord(
-                    type = ConversionType.Audio,
-                    title = name,
-                    sourceUri = uri.toString(),
-                    resultText = "",
-                    status = ConversionStatus.Pending,
-                    message = "已导入本地文件，未上传云端。"
+            val profile = performanceMode.profile
+            if (!sherpaEngine.isBundledModelReady()) {
+                sherpaReady = false
+                statusText = "缺少内置语音模型，请重新安装新版 APK"
+                app.repository.save(
+                    ConversionRecord(
+                        type = ConversionType.Audio,
+                        title = name,
+                        sourceUri = uri.toString(),
+                        resultText = "",
+                        status = ConversionStatus.Failed,
+                        message = "缺少 sherpa-onnx 语音模型，未上传云端。"
+                    )
                 )
-            )
+                return@launch
+            }
+            busy = true
+            progress = 0f
+            currentText = ""
+            statusText = "正在本地读取音频..."
+            runCatching {
+                val wav = audioExtractor.extractToWav(uri) { value ->
+                    progress = value
+                    statusText = "正在本地处理音频 ${(value * 100).toInt()}%"
+                }
+                statusText = "正在识别${language.label}：${performanceMode.label}模式"
+                val text = sherpaEngine.transcribe(wav, language, profile) { value ->
+                    progress = value
+                    statusText = "正在识别${language.label} ${(value * 100).toInt()}%"
+                }
+                wav.delete()
+                normalizeRecognizedText(text, language).ifBlank { "未识别到语音文字" }
+            }.onSuccess { text ->
+                currentText = text
+                progress = 1f
+                statusText = "音频本地转文字完成：${language.label}"
+                app.repository.save(
+                    ConversionRecord(
+                        type = ConversionType.Audio,
+                        title = name,
+                        sourceUri = uri.toString(),
+                        resultText = text,
+                        status = ConversionStatus.Success
+                    )
+                )
+            }.onFailure { error ->
+                currentText = ""
+                statusText = "音频本地转文字失败：${error.message ?: "未知错误"}"
+                app.repository.save(
+                    ConversionRecord(
+                        type = ConversionType.Audio,
+                        title = name,
+                        sourceUri = uri.toString(),
+                        resultText = "",
+                        status = ConversionStatus.Failed,
+                        message = statusText
+                    )
+                )
+            }
+            busy = false
         }
     }
 
@@ -606,22 +633,24 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
     val clipboard = LocalClipboardManager.current
     var liveSpeech by remember { mutableStateOf("") }
     var listening by remember { mutableStateOf(false) }
+    var showAudioActionDialog by remember { mutableStateOf(false) }
+    var pendingVideoUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingAudioUri by remember { mutableStateOf<Uri?>(null) }
 
-    val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let(viewModel::importModel)
-    }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let(viewModel::recognizeImage)
     }
     val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let(viewModel::importAudio)
+        uri?.let {
+            pendingAudioUri = it
+        }
     }
     val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
             runCatching {
                 context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            viewModel.transcribeVideo(it)
+            pendingVideoUri = it
         }
     }
 
@@ -677,15 +706,9 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
             Text("视频、语音、图片统一转换，结果自动进入历史记录", color = Color(0xFF52616B))
         }
         item {
-            ModelCard(
-                ready = viewModel.sherpaReady,
-                onImport = { modelPicker.launch("application/zip") }
-            )
-        }
-        item {
-            RecognitionModeSelector(
-                selected = viewModel.recognitionMode,
-                onSelect = viewModel::updateRecognitionMode
+            PerformanceModeSelector(
+                selected = viewModel.performanceMode,
+                onSelect = viewModel::updatePerformanceMode
             )
         }
         item {
@@ -702,18 +725,7 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
                     subtitle = "支持实时录音识别，也可导入音频文件",
                     icon = Icons.Default.Mic,
                     color = Color(0xFF0F766E),
-                    onClick = {
-                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                            startSpeech(context, recognizer)
-                        } else {
-                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        }
-                    },
-                    extra = {
-                        OutlinedButton(onClick = { audioPicker.launch("audio/*") }) {
-                            Text("导入音频")
-                        }
-                    }
+                    onClick = { showAudioActionDialog = true }
                 )
                 ToolCard(
                     title = "图片转文字",
@@ -745,6 +757,113 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
             )
         }
     }
+
+    if (showAudioActionDialog) {
+        AudioActionDialog(
+            onDismiss = { showAudioActionDialog = false },
+            onLiveSpeech = {
+                showAudioActionDialog = false
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    startSpeech(context, recognizer)
+                } else {
+                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            },
+            onImportAudio = {
+                showAudioActionDialog = false
+                audioPicker.launch("audio/*")
+            }
+        )
+    }
+
+    if (pendingVideoUri != null || pendingAudioUri != null) {
+        SpeechLanguageDialog(
+            onDismiss = {
+                pendingVideoUri = null
+                pendingAudioUri = null
+            },
+            onSelect = { language ->
+                val videoUri = pendingVideoUri
+                val audioUri = pendingAudioUri
+                pendingVideoUri = null
+                pendingAudioUri = null
+                when {
+                    videoUri != null -> viewModel.transcribeVideo(videoUri, language)
+                    audioUri != null -> viewModel.transcribeAudio(audioUri, language)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun AudioActionDialog(
+    onDismiss: () -> Unit,
+    onLiveSpeech: () -> Unit,
+    onImportAudio: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("语音转文字") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("选择语音来源", color = Color(0xFF64748B))
+                Button(onClick = onLiveSpeech, modifier = Modifier.fillMaxWidth()) {
+                    Text("实时录音")
+                }
+                Button(onClick = onImportAudio, modifier = Modifier.fillMaxWidth()) {
+                    Text("导入音频")
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
+fun SpeechLanguageDialog(
+    onDismiss: () -> Unit,
+    onSelect: (SpeechLanguage) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择识别语言") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                SpeechLanguage.entries.chunked(3).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        row.forEach { language ->
+                            Button(
+                                onClick = { onSelect(language) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(language.label, maxLines = 1)
+                            }
+                        }
+                        repeat(3 - row.size) {
+                            Spacer(Modifier.weight(1f))
+                        }
+                    }
+                }
+                Text(
+                    "四川话、上海话、口音普通话、中英混合请选择“其它方言”。",
+                    color = Color(0xFF64748B),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }
 
 @Composable
@@ -1369,9 +1488,9 @@ fun ModelCard(ready: Boolean, onImport: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RecognitionModeSelector(
-    selected: RecognitionMode,
-    onSelect: (RecognitionMode) -> Unit
+fun PerformanceModeSelector(
+    selected: PerformanceMode,
+    onSelect: (PerformanceMode) -> Unit
 ) {
     Card(
         shape = RoundedCornerShape(8.dp),
@@ -1379,9 +1498,9 @@ fun RecognitionModeSelector(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("视频识别模式", fontWeight = FontWeight.SemiBold)
+            Text("性能模式", fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                RecognitionMode.entries.forEach { mode ->
+                PerformanceMode.entries.forEach { mode ->
                     FilterChip(
                         selected = selected == mode,
                         onClick = { onSelect(mode) },
@@ -1390,11 +1509,7 @@ fun RecognitionModeSelector(
                 }
             }
             Text(
-                when (selected) {
-                    RecognitionMode.MandarinAccurate -> "默认推荐，适合普通话课程、访谈、会议和讲解视频。"
-                    RecognitionMode.DialectEnhanced -> "适合普通话不标准、粤语、中英混合或口音较重的视频。"
-                    RecognitionMode.FastFallback -> "仅作低性能手机备用，准确率低于前两个模式。"
-                },
+                selected.description,
                 color = Color(0xFF64748B)
             )
         }
@@ -1692,6 +1807,16 @@ private fun formatDuration(ms: Long): String {
 
 private fun formatSpeed(speed: Float): String =
     "${String.format(Locale.US, "%.2f", speed).trimEnd('0').trimEnd('.')}x"
+
+private fun normalizeRecognizedText(text: String, language: SpeechLanguage): String =
+    when (language) {
+        SpeechLanguage.English,
+        SpeechLanguage.OtherDialect -> text.replace(Regex("\\s+"), " ").trim()
+        SpeechLanguage.Mandarin,
+        SpeechLanguage.Japanese,
+        SpeechLanguage.Korean,
+        SpeechLanguage.Cantonese -> text.replace(Regex("\\s+"), "").trim()
+    }
 
 private fun typeLabel(type: ConversionType): String = when (type) {
     ConversionType.Video -> "视频"

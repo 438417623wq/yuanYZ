@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.ceil
 
 class SherpaSpeechEngine(private val context: Context) {
     fun isBundledModelReady(): Boolean = runCatching {
@@ -21,36 +22,44 @@ class SherpaSpeechEngine(private val context: Context) {
 
     suspend fun transcribe(
         wavFile: File,
-        mode: RecognitionMode,
+        language: SpeechLanguage,
+        profile: PerformanceProfile,
         onProgress: (Float) -> Unit
     ): String = withContext(Dispatchers.IO) {
-        val language = when (mode) {
-            RecognitionMode.MandarinAccurate -> "zh"
-            RecognitionMode.DialectEnhanced -> "auto"
-            RecognitionMode.FastFallback -> "zh"
-        }
-        val recognizer = createRecognizer(language)
+        val recognizer = createRecognizer(language.modelCode, profile.speechThreads)
         try {
-            val samples = readPcm16WavAsFloat(wavFile)
-            if (samples.isEmpty()) return@withContext ""
-
-            val chunkSize = 16_000 * 25
             val parts = ArrayList<String>()
-            var offset = 0
-            while (offset < samples.size) {
-                val end = (offset + chunkSize).coerceAtMost(samples.size)
-                val chunk = samples.copyOfRange(offset, end)
-                val stream = recognizer.createStream()
-                try {
-                    stream.acceptWaveform(chunk, 16_000)
-                    recognizer.decode(stream)
-                    val text = recognizer.getResult(stream).text.cleanupSenseVoiceText()
-                    if (text.isNotBlank()) parts.add(text)
-                } finally {
-                    stream.release()
+            val dataBytes = (wavFile.length() - 44L).coerceAtLeast(0L)
+            if (dataBytes == 0L) return@withContext ""
+
+            val chunkBytes = profile.speechChunkSeconds.coerceAtLeast(5) * 16_000 * 2
+            val totalChunks = ceil(dataBytes.toDouble() / chunkBytes).toInt().coerceAtLeast(1)
+            wavFile.inputStream().buffered().use { input ->
+                if (input.skip(44) < 44) error("音频文件格式错误")
+                val buffer = ByteArray(chunkBytes)
+                var readBytes = 0L
+                var chunkIndex = 0
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    readBytes += read
+                    chunkIndex += 1
+                    val samples = pcm16BytesToFloat(buffer, read)
+                    if (samples.isNotEmpty()) {
+                        val stream = recognizer.createStream()
+                        try {
+                            stream.acceptWaveform(samples, 16_000)
+                            recognizer.decode(stream)
+                            val text = recognizer.getResult(stream).text.cleanupSenseVoiceText()
+                            if (text.isNotBlank()) parts.add(text)
+                        } finally {
+                            stream.release()
+                        }
+                    }
+                    val chunkProgress = chunkIndex.toFloat() / totalChunks
+                    val byteProgress = readBytes.toFloat() / dataBytes
+                    onProgress(0.95f + (maxOf(chunkProgress, byteProgress) * 0.05f).coerceIn(0f, 0.05f))
                 }
-                offset = end
-                onProgress(0.95f + ((offset.toFloat() / samples.size) * 0.05f).coerceIn(0f, 0.05f))
             }
             parts.joinToString("").ifBlank { parts.joinToString("\n") }
         } finally {
@@ -58,7 +67,7 @@ class SherpaSpeechEngine(private val context: Context) {
         }
     }
 
-    private fun createRecognizer(language: String): OfflineRecognizer {
+    private fun createRecognizer(language: String, threads: Int): OfflineRecognizer {
         val config = OfflineRecognizerConfig(
             featConfig = FeatureConfig(sampleRate = 16_000, featureDim = 80),
             modelConfig = OfflineModelConfig(
@@ -68,7 +77,7 @@ class SherpaSpeechEngine(private val context: Context) {
                     useInverseTextNormalization = true
                 ),
                 tokens = "$assetRoot/tokens.txt",
-                numThreads = 4,
+                numThreads = threads.coerceIn(1, 4),
                 provider = "cpu"
             ),
             decodingMethod = "greedy_search"
@@ -81,11 +90,10 @@ class SherpaSpeechEngine(private val context: Context) {
     }
 }
 
-private fun readPcm16WavAsFloat(file: File): FloatArray {
-    val bytes = file.readBytes()
-    if (bytes.size <= 44) return FloatArray(0)
-    val audioBytes = bytes.copyOfRange(44, bytes.size)
-    val shorts = ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+private fun pcm16BytesToFloat(bytes: ByteArray, read: Int): FloatArray {
+    val usable = read - (read % 2)
+    if (usable <= 0) return FloatArray(0)
+    val shorts = ByteBuffer.wrap(bytes, 0, usable).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
     return FloatArray(shorts.remaining()) { shorts.get().toFloat() / Short.MAX_VALUE }
 }
 
