@@ -60,6 +60,16 @@
 - 常见许可证：Apache License 2.0
 - 注意：以实际依赖包随附的许可证为准。
 
+### AndroidX Media3 / ExoPlayer
+
+- 用途：字幕校对界面的视频播放、横竖屏播放、全屏播放、进度拖动和倍速控制。
+- 依赖：
+  - `androidx.media3:media3-exoplayer:1.5.1`
+  - `androidx.media3:media3-ui:1.5.1`
+- 上游：https://developer.android.com/media/media3
+- 常见许可证：Apache License 2.0
+- 注意：以实际依赖包随附的许可证为准。
+
 ### Kotlin 与 kotlinx.coroutines
 
 - 用途：Kotlin 语言运行时和协程支持。

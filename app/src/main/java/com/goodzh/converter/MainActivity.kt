@@ -1,9 +1,11 @@
 package com.goodzh.converter
 
 import android.Manifest
+import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -11,7 +13,7 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.widget.VideoView
+import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -52,6 +54,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Videocam
@@ -60,6 +63,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -70,6 +75,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -98,6 +104,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -113,6 +122,11 @@ import com.goodzh.converter.domain.RecognitionMode
 import com.goodzh.converter.domain.SherpaSpeechEngine
 import com.goodzh.converter.domain.VideoAudioExtractor
 import com.goodzh.converter.domain.displayName
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -150,6 +164,21 @@ data class TextNoteSession(
     val title: String,
     val text: String
 )
+
+enum class VideoOrientationMode(
+    val label: String,
+    val requestedOrientation: Int
+) {
+    Auto("自动", ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED),
+    Portrait("竖屏", ActivityInfo.SCREEN_ORIENTATION_PORTRAIT),
+    Landscape("横屏", ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+
+    fun next(): VideoOrientationMode = when (this) {
+        Auto -> Landscape
+        Landscape -> Portrait
+        Portrait -> Auto
+    }
+}
 
 class ConverterViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as GoodZhApp
@@ -760,6 +789,10 @@ fun AboutDialog(onDismiss: () -> Unit) {
                     body = "用于图片 OCR。ML Kit 对输入数据的处理在设备端完成，但可能联系 Google 服务器获取修复、模型更新、硬件兼容信息，也可能发送 API 性能和使用指标。"
                 )
                 NoticeSection(
+                    title = "AndroidX Media3 / ExoPlayer",
+                    body = "用于字幕校对界面的视频播放、全屏播放、横竖屏切换、进度拖动和倍速控制。相关组件通常遵循 Apache License 2.0。"
+                )
+                NoticeSection(
                     title = "AndroidX / Jetpack Compose / Kotlin",
                     body = "用于 Android 应用框架、界面和协程能力。相关组件通常遵循 Apache License 2.0，以实际依赖包随附许可证为准。"
                 )
@@ -871,6 +904,7 @@ fun TextNoteScreen(
     }
 }
 
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun VideoSubtitleEditorScreen(
     session: VideoEditSession,
@@ -878,9 +912,8 @@ fun VideoSubtitleEditorScreen(
     onSave: (List<SubtitleSegment>) -> Unit,
     onReplaceVideo: (Uri, List<SubtitleSegment>) -> Unit
 ) {
-    BackHandler(onBack = onClose)
-
     val context = LocalContext.current
+    val activity = context as? Activity
     val clipboard = LocalClipboardManager.current
     var segments by remember(session.recordId, session.segments) { mutableStateOf(session.segments) }
     var selectedId by remember(session.recordId) { mutableStateOf(session.segments.firstOrNull()?.id) }
@@ -889,13 +922,31 @@ fun VideoSubtitleEditorScreen(
     var isPlaying by remember { mutableStateOf(false) }
     var isVideoReady by remember(session.videoUri) { mutableStateOf(false) }
     var videoError by remember(session.videoUri) { mutableStateOf<String?>(null) }
-    var videoView by remember { mutableStateOf<VideoView?>(null) }
     var editingSegmentId by remember(session.recordId) { mutableStateOf<Long?>(null) }
     var editDraft by remember { mutableStateOf("") }
+    var playbackSpeed by remember { mutableStateOf(1f) }
+    var speedMenuExpanded by remember { mutableStateOf(false) }
+    var isFullScreen by remember { mutableStateOf(false) }
+    var orientationMode by remember { mutableStateOf(VideoOrientationMode.Auto) }
+
+    BackHandler {
+        if (isFullScreen) {
+            isFullScreen = false
+        } else {
+            onClose()
+        }
+    }
 
     val selectedSegment = segments.firstOrNull { it.id == selectedId } ?: segments.firstOrNull()
     val activeSegment = segments.lastOrNull { positionMs.toLong() >= it.startMs } ?: segments.firstOrNull()
     val fullText = segments.joinToString("\n") { it.text }.trim()
+    val speedOptions = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+    val player = remember(session.videoUri) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(session.videoUri))
+            prepare()
+        }
+    }
 
     val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
@@ -907,22 +958,21 @@ fun VideoSubtitleEditorScreen(
             isPlaying = false
             isVideoReady = false
             videoError = null
+            player.setMediaItem(MediaItem.fromUri(it))
+            player.prepare()
             onReplaceVideo(it, segments)
         }
     }
 
     val togglePlayback: () -> Unit = {
-        val view = videoView
-        if (view == null) {
-            videoError = "播放器还没有初始化，请稍后重试"
-        } else if (view.isPlaying) {
-            view.pause()
+        if (player.isPlaying) {
+            player.pause()
             isPlaying = false
         } else if (videoError != null) {
             videoError = "原视频无法读取，请重新选择视频文件"
         } else {
             runCatching {
-                view.start()
+                player.play()
                 isPlaying = true
             }.onFailure {
                 videoError = "播放失败，请重新选择视频文件"
@@ -931,21 +981,86 @@ fun VideoSubtitleEditorScreen(
         }
     }
 
-    LaunchedEffect(videoView) {
-        while (true) {
-            val view = videoView
-            if (view != null) {
-                positionMs = view.currentPosition
-                durationMs = view.duration.takeIf { it > 0 } ?: durationMs
-                isPlaying = view.isPlaying
+    DisposableEffect(activity) {
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        onDispose {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            activity?.window?.let { window ->
+                WindowCompat.setDecorFitsSystemWindows(window, true)
+                WindowInsetsControllerCompat(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
             }
-            delay(250)
         }
     }
 
-    DisposableEffect(videoView) {
+    LaunchedEffect(activity, orientationMode) {
+        activity?.requestedOrientation = orientationMode.requestedOrientation
+    }
+
+    DisposableEffect(activity, isFullScreen) {
+        val window = activity?.window
+        if (window != null) {
+            val controller = WindowInsetsControllerCompat(window, window.decorView)
+            if (isFullScreen) {
+                WindowCompat.setDecorFitsSystemWindows(window, false)
+                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            } else {
+                WindowCompat.setDecorFitsSystemWindows(window, true)
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
         onDispose {
-            videoView?.stopPlayback()
+            if (window != null) {
+                WindowCompat.setDecorFitsSystemWindows(window, true)
+                WindowInsetsControllerCompat(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                val duration = player.duration
+                if (duration > 0) {
+                    durationMs = duration.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                }
+                isVideoReady = playbackState == Player.STATE_READY || durationMs > 0
+                if (playbackState == Player.STATE_ENDED) {
+                    isPlaying = false
+                }
+            }
+
+            override fun onIsPlayingChanged(isPlayingNow: Boolean) {
+                isPlaying = isPlayingNow
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                isPlaying = false
+                isVideoReady = false
+                durationMs = 0
+                videoError = "原视频读取失败，请重新选择视频文件"
+            }
+        }
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            player.release()
+        }
+    }
+
+    LaunchedEffect(player, playbackSpeed) {
+        player.setPlaybackSpeed(playbackSpeed)
+    }
+
+    LaunchedEffect(player) {
+        while (true) {
+            positionMs = player.currentPosition.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            val duration = player.duration
+            if (duration > 0) {
+                durationMs = duration.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            }
+            isPlaying = player.isPlaying
+            delay(250)
         }
     }
 
@@ -954,33 +1069,35 @@ fun VideoSubtitleEditorScreen(
             .fillMaxSize()
             .background(Color(0xFF111111))
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onClose) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = Color.White)
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text("字幕校对", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text(session.title, color = Color(0xFFBDBDBD), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            IconButton(onClick = {
-                if (fullText.isNotBlank()) clipboard.setText(AnnotatedString(fullText))
-            }) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "复制", tint = Color.White)
-            }
-            IconButton(onClick = {
-                if (fullText.isNotBlank()) shareText(context, fullText)
-            }) {
-                Icon(Icons.Default.Share, contentDescription = "分享", tint = Color.White)
-            }
-            Button(onClick = { onSave(segments) }) {
-                Icon(Icons.Default.Check, contentDescription = null)
-                Spacer(Modifier.width(6.dp))
-                Text("保存")
+        if (!isFullScreen) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = Color.White)
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("字幕校对", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(session.title, color = Color(0xFFBDBDBD), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                IconButton(onClick = {
+                    if (fullText.isNotBlank()) clipboard.setText(AnnotatedString(fullText))
+                }) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = "复制", tint = Color.White)
+                }
+                IconButton(onClick = {
+                    if (fullText.isNotBlank()) shareText(context, fullText)
+                }) {
+                    Icon(Icons.Default.Share, contentDescription = "分享", tint = Color.White)
+                }
+                Button(onClick = { onSave(segments) }) {
+                    Icon(Icons.Default.Check, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("保存")
+                }
             }
         }
 
@@ -993,40 +1110,17 @@ fun VideoSubtitleEditorScreen(
         ) {
             AndroidView(
                 factory = { ctx ->
-                    VideoView(ctx).apply {
-                        isClickable = false
-                        isFocusable = false
-                        setOnPreparedListener { player ->
-                            durationMs = player.duration.takeIf { it > 0 } ?: duration
-                            isVideoReady = true
-                            videoError = null
-                            player.isLooping = false
-                        }
-                        setOnCompletionListener { isPlaying = false }
-                        setOnErrorListener { _, _, _ ->
-                            isVideoReady = false
-                            isPlaying = false
-                            durationMs = 0
-                            videoError = "原视频读取失败，请重新选择视频文件"
-                            true
-                        }
-                        tag = session.videoUri
-                        setVideoURI(session.videoUri)
-                        videoView = this
+                    PlayerView(ctx).apply {
+                        useController = false
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        this.player = player
                     }
                 },
                 update = { view ->
-                    if (videoView !== view) videoView = view
-                    if (view.tag != session.videoUri) {
-                        view.stopPlayback()
-                        positionMs = 0
-                        durationMs = 0
-                        isPlaying = false
-                        isVideoReady = false
-                        videoError = null
-                        view.tag = session.videoUri
-                        view.setVideoURI(session.videoUri)
-                    }
+                    view.player = player
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -1080,8 +1174,43 @@ fun VideoSubtitleEditorScreen(
                 .padding(horizontal = 18.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("${formatDuration(positionMs.toLong())} / ${formatDuration(durationMs.toLong())}", color = Color.White)
-            Spacer(Modifier.weight(1f))
+            val safeDuration = durationMs.coerceAtLeast(1)
+            Column(modifier = Modifier.weight(1f)) {
+                Text("${formatDuration(positionMs.toLong())} / ${formatDuration(durationMs.toLong())}", color = Color.White)
+                Slider(
+                    value = positionMs.coerceIn(0, safeDuration).toFloat(),
+                    onValueChange = { positionMs = it.toInt() },
+                    onValueChangeFinished = { player.seekTo(positionMs.toLong()) },
+                    valueRange = 0f..safeDuration.toFloat()
+                )
+            }
+            Box {
+                TextButton(onClick = { speedMenuExpanded = true }) {
+                    Text(formatSpeed(playbackSpeed), color = Color.White)
+                }
+                DropdownMenu(
+                    expanded = speedMenuExpanded,
+                    onDismissRequest = { speedMenuExpanded = false }
+                ) {
+                    speedOptions.forEach { speed ->
+                        DropdownMenuItem(
+                            text = { Text(formatSpeed(speed)) },
+                            onClick = {
+                                playbackSpeed = speed
+                                speedMenuExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+            TextButton(onClick = { orientationMode = orientationMode.next() }) {
+                Icon(Icons.Default.ScreenRotation, contentDescription = null, tint = Color.White)
+                Spacer(Modifier.width(4.dp))
+                Text(orientationMode.label, color = Color.White)
+            }
+            TextButton(onClick = { isFullScreen = !isFullScreen }) {
+                Text(if (isFullScreen) "退出全屏" else "全屏", color = Color.White)
+            }
             IconButton(
                 onClick = togglePlayback,
                 modifier = Modifier
@@ -1096,52 +1225,54 @@ fun VideoSubtitleEditorScreen(
             }
         }
 
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 300.dp, max = 420.dp)
-                .background(Color(0xFF242424))
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("批量编辑", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.weight(1f))
-                Text("${segments.size} 段", color = Color(0xFFBDBDBD))
-            }
-            Spacer(Modifier.height(8.dp))
-
-            selectedSegment?.let { segment ->
-                TextField(
-                    value = segment.text,
-                    onValueChange = { value ->
-                        segments = segments.map { if (it.id == segment.id) it.copy(text = value) else it }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    label = { Text(formatDuration(segment.startMs)) }
-                )
+        if (!isFullScreen) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 300.dp, max = 420.dp)
+                    .background(Color(0xFF242424))
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("批量编辑", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.weight(1f))
+                    Text("${segments.size} 段", color = Color(0xFFBDBDBD))
+                }
                 Spacer(Modifier.height(8.dp))
-            }
 
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(segments, key = { it.id }) { segment ->
-                    SubtitleSegmentRow(
-                        segment = segment,
-                        selected = segment.id == selectedSegment?.id,
-                        onClick = {
-                            selectedId = segment.id
-                            videoView?.seekTo(segment.startMs.toInt())
+                selectedSegment?.let { segment ->
+                    TextField(
+                        value = segment.text,
+                        onValueChange = { value ->
+                            segments = segments.map { if (it.id == segment.id) it.copy(text = value) else it }
                         },
-                        onEdit = {
-                            selectedId = segment.id
-                            editDraft = segment.text
-                            editingSegmentId = segment.id
-                        },
-                        onDelete = {
-                            segments = segments.filterNot { it.id == segment.id }
-                            selectedId = segments.firstOrNull()?.id
-                        }
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        label = { Text(formatDuration(segment.startMs)) }
                     )
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(segments, key = { it.id }) { segment ->
+                        SubtitleSegmentRow(
+                            segment = segment,
+                            selected = segment.id == selectedSegment?.id,
+                            onClick = {
+                                selectedId = segment.id
+                                player.seekTo(segment.startMs)
+                            },
+                            onEdit = {
+                                selectedId = segment.id
+                                editDraft = segment.text
+                                editingSegmentId = segment.id
+                            },
+                            onDelete = {
+                                segments = segments.filterNot { it.id == segment.id }
+                                selectedId = segments.firstOrNull()?.id
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1558,6 +1689,9 @@ private fun formatDuration(ms: Long): String {
     val seconds = totalSeconds % 60
     return "%02d:%02d".format(minutes, seconds)
 }
+
+private fun formatSpeed(speed: Float): String =
+    "${String.format(Locale.US, "%.2f", speed).trimEnd('0').trimEnd('.')}x"
 
 private fun typeLabel(type: ConversionType): String = when (type) {
     ConversionType.Video -> "视频"
