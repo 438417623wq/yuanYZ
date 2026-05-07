@@ -435,7 +435,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         if (record.type != ConversionType.Video || record.status != ConversionStatus.Success || record.sourceUri.isBlank()) return
         val uri = Uri.parse(record.sourceUri)
         val segments = record.segmentsJson.toSubtitleSegments()
-            .ifEmpty { buildSubtitleSegments(record.resultText, videoDurationMs(getApplication(), uri)) }
+            .ifEmpty { buildSubtitleSegments(record.resultText, 0L) }
         activeVideoEditor = VideoEditSession(
             recordId = record.id,
             title = record.title,
@@ -468,6 +468,30 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             activeVideoEditor = session.copy(segments = segments)
         }
     }
+
+    fun replaceVideoEditorUri(uri: Uri, segments: List<SubtitleSegment>) {
+        val session = activeVideoEditor ?: return
+        viewModelScope.launch {
+            val title = displayName(getApplication(), uri)
+            val editedText = segments.joinToString("\n") { it.text }.trim()
+            app.repository.update(
+                ConversionRecord(
+                    id = session.recordId,
+                    type = ConversionType.Video,
+                    title = title,
+                    sourceUri = uri.toString(),
+                    resultText = editedText,
+                    segmentsJson = segments.toJsonString(),
+                    status = ConversionStatus.Success
+                )
+            )
+            activeVideoEditor = session.copy(
+                title = title,
+                videoUri = uri,
+                segments = segments
+            )
+        }
+    }
 }
 
 @Suppress("UNCHECKED_CAST")
@@ -491,7 +515,8 @@ fun ConverterApp(
         VideoSubtitleEditorScreen(
             session = editorSession,
             onClose = viewModel::closeVideoEditor,
-            onSave = viewModel::saveVideoSubtitles
+            onSave = viewModel::saveVideoSubtitles,
+            onReplaceVideo = viewModel::replaceVideoEditorUri
         )
         return
     }
@@ -850,24 +875,63 @@ fun TextNoteScreen(
 fun VideoSubtitleEditorScreen(
     session: VideoEditSession,
     onClose: () -> Unit,
-    onSave: (List<SubtitleSegment>) -> Unit
+    onSave: (List<SubtitleSegment>) -> Unit,
+    onReplaceVideo: (Uri, List<SubtitleSegment>) -> Unit
 ) {
     BackHandler(onBack = onClose)
 
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    var segments by remember(session.recordId) { mutableStateOf(session.segments) }
+    var segments by remember(session.recordId, session.segments) { mutableStateOf(session.segments) }
     var selectedId by remember(session.recordId) { mutableStateOf(session.segments.firstOrNull()?.id) }
     var positionMs by remember { mutableIntStateOf(0) }
     var durationMs by remember { mutableIntStateOf(0) }
     var isPlaying by remember { mutableStateOf(false) }
+    var isVideoReady by remember(session.videoUri) { mutableStateOf(false) }
+    var videoError by remember(session.videoUri) { mutableStateOf<String?>(null) }
     var videoView by remember { mutableStateOf<VideoView?>(null) }
+    var editingSegmentId by remember(session.recordId) { mutableStateOf<Long?>(null) }
+    var editDraft by remember { mutableStateOf("") }
 
     val selectedSegment = segments.firstOrNull { it.id == selectedId } ?: segments.firstOrNull()
     val activeSegment = segments.lastOrNull { positionMs.toLong() >= it.startMs } ?: segments.firstOrNull()
     val fullText = segments.joinToString("\n") { it.text }.trim()
 
-    LaunchedEffect(videoView, isPlaying) {
+    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            positionMs = 0
+            durationMs = 0
+            isPlaying = false
+            isVideoReady = false
+            videoError = null
+            onReplaceVideo(it, segments)
+        }
+    }
+
+    val togglePlayback: () -> Unit = {
+        val view = videoView
+        if (view == null) {
+            videoError = "播放器还没有初始化，请稍后重试"
+        } else if (view.isPlaying) {
+            view.pause()
+            isPlaying = false
+        } else if (videoError != null) {
+            videoError = "原视频无法读取，请重新选择视频文件"
+        } else {
+            runCatching {
+                view.start()
+                isPlaying = true
+            }.onFailure {
+                videoError = "播放失败，请重新选择视频文件"
+                isPlaying = false
+            }
+        }
+    }
+
+    LaunchedEffect(videoView) {
         while (true) {
             val view = videoView
             if (view != null) {
@@ -930,19 +994,47 @@ fun VideoSubtitleEditorScreen(
             AndroidView(
                 factory = { ctx ->
                     VideoView(ctx).apply {
-                        setVideoURI(session.videoUri)
+                        isClickable = false
+                        isFocusable = false
                         setOnPreparedListener { player ->
-                            durationMs = duration
+                            durationMs = player.duration.takeIf { it > 0 } ?: duration
+                            isVideoReady = true
+                            videoError = null
                             player.isLooping = false
                         }
                         setOnCompletionListener { isPlaying = false }
+                        setOnErrorListener { _, _, _ ->
+                            isVideoReady = false
+                            isPlaying = false
+                            durationMs = 0
+                            videoError = "原视频读取失败，请重新选择视频文件"
+                            true
+                        }
+                        tag = session.videoUri
+                        setVideoURI(session.videoUri)
                         videoView = this
                     }
                 },
                 update = { view ->
                     if (videoView !== view) videoView = view
+                    if (view.tag != session.videoUri) {
+                        view.stopPlayback()
+                        positionMs = 0
+                        durationMs = 0
+                        isPlaying = false
+                        isVideoReady = false
+                        videoError = null
+                        view.tag = session.videoUri
+                        view.setVideoURI(session.videoUri)
+                    }
                 },
                 modifier = Modifier.fillMaxSize()
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(onClick = togglePlayback)
             )
 
             Text(
@@ -956,6 +1048,29 @@ fun VideoSubtitleEditorScreen(
                     .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
                     .padding(horizontal = 10.dp, vertical = 6.dp)
             )
+
+            if (!isVideoReady || videoError != null) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(18.dp)
+                        .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(8.dp))
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        videoError ?: "正在读取原视频...",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    if (videoError != null) {
+                        Button(onClick = { videoPicker.launch(arrayOf("video/*")) }) {
+                            Text("重新选择视频")
+                        }
+                    }
+                }
+            }
         }
 
         Row(
@@ -968,16 +1083,7 @@ fun VideoSubtitleEditorScreen(
             Text("${formatDuration(positionMs.toLong())} / ${formatDuration(durationMs.toLong())}", color = Color.White)
             Spacer(Modifier.weight(1f))
             IconButton(
-                onClick = {
-                    val view = videoView ?: return@IconButton
-                    if (view.isPlaying) {
-                        view.pause()
-                        isPlaying = false
-                    } else {
-                        view.start()
-                        isPlaying = true
-                    }
-                },
+                onClick = togglePlayback,
                 modifier = Modifier
                     .size(48.dp)
                     .background(Color.White, RoundedCornerShape(24.dp))
@@ -1026,6 +1132,11 @@ fun VideoSubtitleEditorScreen(
                             selectedId = segment.id
                             videoView?.seekTo(segment.startMs.toInt())
                         },
+                        onEdit = {
+                            selectedId = segment.id
+                            editDraft = segment.text
+                            editingSegmentId = segment.id
+                        },
                         onDelete = {
                             segments = segments.filterNot { it.id == segment.id }
                             selectedId = segments.firstOrNull()?.id
@@ -1035,6 +1146,40 @@ fun VideoSubtitleEditorScreen(
             }
         }
     }
+
+    val editingSegment = segments.firstOrNull { it.id == editingSegmentId }
+    if (editingSegment != null) {
+        AlertDialog(
+            onDismissRequest = { editingSegmentId = null },
+            title = { Text("编辑字幕") },
+            text = {
+                TextField(
+                    value = editDraft,
+                    onValueChange = { editDraft = it },
+                    label = { Text(formatDuration(editingSegment.startMs)) },
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        segments = segments.map {
+                            if (it.id == editingSegment.id) it.copy(text = editDraft) else it
+                        }
+                        editingSegmentId = null
+                    }
+                ) {
+                    Text("保存")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingSegmentId = null }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -1042,6 +1187,7 @@ fun SubtitleSegmentRow(
     segment: SubtitleSegment,
     selected: Boolean,
     onClick: () -> Unit,
+    onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
     Row(
@@ -1059,7 +1205,9 @@ fun SubtitleSegmentRow(
     ) {
         Text(formatDuration(segment.startMs), color = Color(0xFF9CA3AF), modifier = Modifier.width(56.dp))
         Text(segment.text, color = Color.White, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
-        Icon(Icons.Default.Edit, contentDescription = null, tint = Color(0xFFBDBDBD), modifier = Modifier.size(18.dp))
+        IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
+            Icon(Icons.Default.Edit, contentDescription = "编辑", tint = Color(0xFFBDBDBD))
+        }
         IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
             Icon(Icons.Default.Delete, contentDescription = "删除", tint = Color(0xFFBDBDBD))
         }
