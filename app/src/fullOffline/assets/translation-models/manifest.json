@@ -1,55 +1,72 @@
 {
   "pack": "goodzh-full-offline-translation",
-  "version": "1.0",
-  "engine": "onnx-marian-int8",
+  "version": "1.2",
+  "engine": "onnx-marian-quantized",
+  "runtime": "onnxruntime-android",
+  "pivotRoutes": ["en", "zh"],
+  "requiredFiles": [
+    "manifest.json",
+    "encoder_model_quantized.onnx",
+    "decoder_model_quantized.onnx",
+    "tokenizer.json",
+    "vocab.json",
+    "config.json",
+    "generation_config.json",
+    "license.txt"
+  ],
   "directions": [
     {
       "id": "en-zh",
       "name": "英文转中文",
       "source": "en",
       "target": "zh",
+      "repository": "onnx-community/opus-mt-en-zh",
       "license": "CC-BY 4.0",
-      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+      "status": "ready"
     },
     {
       "id": "zh-en",
       "name": "中文转英文",
       "source": "zh",
       "target": "en",
+      "repository": "onnx-community/opus-mt-zh-en",
       "license": "CC-BY 4.0",
-      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+      "status": "ready"
     },
     {
-      "id": "ja-zh",
-      "name": "日文转中文",
-      "source": "ja",
-      "target": "zh",
-      "license": "CC-BY 4.0",
-      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
-    },
-    {
-      "id": "zh-ja",
-      "name": "中文转日文",
-      "source": "zh",
+      "id": "en-ja",
+      "name": "英文转日文",
+      "source": "en",
       "target": "ja",
+      "repository": "Xenova/opus-mt-en-jap",
       "license": "CC-BY 4.0",
-      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+      "status": "ready"
     },
     {
-      "id": "ko-zh",
-      "name": "韩文转中文",
+      "id": "ja-en",
+      "name": "日文转英文",
+      "source": "ja",
+      "target": "en",
+      "repository": "Xenova/opus-mt-jap-en",
+      "license": "CC-BY 4.0",
+      "status": "ready"
+    },
+    {
+      "id": "ko-en",
+      "name": "韩文转英文",
       "source": "ko",
-      "target": "zh",
+      "target": "en",
+      "repository": "Xenova/opus-mt-ko-en",
       "license": "CC-BY 4.0",
-      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+      "status": "ready"
     },
     {
-      "id": "zh-ko",
-      "name": "中文转韩文",
-      "source": "zh",
+      "id": "en-ko",
+      "name": "英文转韩文",
+      "source": "en",
       "target": "ko",
       "license": "CC-BY 4.0",
-      "requiredFiles": ["manifest.json", "model.onnx", "tokenizer.json", "license.txt"]
+      "status": "missing-public-onnx-export"
     }
   ]
 }

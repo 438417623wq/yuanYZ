@@ -1134,7 +1134,7 @@ fun AboutDialog(onDismiss: () -> Unit) {
                 )
                 NoticeSection(
                     title = "OPUS-MT / Marian 本地翻译模型",
-                    body = "fullOffline 版预留英文、中文、日文、韩文互译模型目录。实际内置权重应保留模型来源、许可证和署名信息；推荐使用 CC-BY 4.0 兼容模型，避免带非商业限制的模型进入商业版本。"
+                    body = "fullOffline 版内置 OPUS-MT / Marian ONNX 量化模型，用于中英、中日、韩英等本地字幕翻译路线。模型应保留来源、许可证和署名信息；推荐使用 CC-BY 4.0 兼容模型，避免带非商业限制的模型进入商业版本。"
                 )
                 NoticeSection(
                     title = "Google ML Kit Text Recognition",
@@ -1904,10 +1904,12 @@ fun SubtitleTranslationDialog(
     var source by remember { mutableStateOf(TranslationLanguage.English) }
     var target by remember { mutableStateOf(TranslationLanguage.Chinese) }
     var mode by remember { mutableStateOf(TranslationApplyMode.Bilingual) }
+    val selectedRoute = status.route(source, target)
+    val canTranslate = status.canTranslate(source, target)
     val statusText = when {
         !status.fullOfflineBuild -> "当前是标准版，请打包 fullOffline 版并内置翻译模型。"
-        status.ready -> "内置翻译模型已完整。"
-        else -> "缺少模型：${status.missingDirections.joinToString("、")}"
+        canTranslate -> "当前路线可用：${selectedRoute.joinToString(" + ") { it.id }}"
+        else -> status.unavailableReason(source, target)
     }
 
     AlertDialog(
@@ -1915,7 +1917,11 @@ fun SubtitleTranslationDialog(
         title = { Text("翻译字幕") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(statusText, color = if (status.ready) Color(0xFF0F766E) else Color(0xFFB45309), style = MaterialTheme.typography.bodySmall)
+                Text(
+                    statusText,
+                    color = if (canTranslate) Color(0xFF0F766E) else Color(0xFFB45309),
+                    style = MaterialTheme.typography.bodySmall
+                )
                 Text("原语言", fontWeight = FontWeight.SemiBold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     TranslationLanguage.entries.forEach { language ->
@@ -1953,7 +1959,7 @@ fun SubtitleTranslationDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = source != target,
+                enabled = canTranslate,
                 onClick = { onTranslate(source, target, mode) }
             ) {
                 Text("开始翻译")

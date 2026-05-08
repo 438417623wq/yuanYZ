@@ -1,9 +1,9 @@
 {
-  "id": "zh-en",
-  "source": "zh",
+  "id": "ja-en",
+  "source": "ja",
   "target": "en",
   "engine": "onnx-marian-quantized",
-  "repository": "onnx-community/opus-mt-zh-en",
+  "repository": "Xenova/opus-mt-jap-en",
   "status": "ready",
   "requiredFiles": [
     "encoder_model_quantized.onnx",

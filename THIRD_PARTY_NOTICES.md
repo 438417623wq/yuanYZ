@@ -54,12 +54,27 @@
 
 ### OPUS-MT / Marian translation models
 
-- 用途：`fullOffline` 版本预留的本地字幕翻译模型，用于英文、中文、日文、韩文之间互译。
+- 用途：`fullOffline` 版本的本地字幕翻译模型，用于字幕文本离线翻译。
 - 文件：`app/src/fullOffline/assets/translation-models/`
+- 当前内置方向：`en-zh`、`zh-en`、`en-ja`、`ja-en`、`ko-en`
+- 当前模型仓库：
+  - https://huggingface.co/onnx-community/opus-mt-en-zh
+  - https://huggingface.co/onnx-community/opus-mt-zh-en
+  - https://huggingface.co/Xenova/opus-mt-en-jap
+  - https://huggingface.co/Xenova/opus-mt-jap-en
+  - https://huggingface.co/Xenova/opus-mt-ko-en
 - 推荐模型来源：https://github.com/Helsinki-NLP/OPUS-MT-train
 - 常见模型仓库：https://huggingface.co/Helsinki-NLP
 - 常见许可证：CC-BY 4.0，具体以每个模型目录内的 `license.txt` 和上游模型页为准。
-- 注意：当前源码仓库只提交模型目录规范和占位清单，没有提交真实翻译权重。正式内置、二次分发或商业化前，应在每个方向目录放入 `license.txt`，记录模型名称、来源链接、许可证、转换/量化方式和修改日期；不要使用带非商业限制或来源不清的模型进入商业版本。
+- 注意：`en-ko` 方向当前只保留规范和占位清单。正式内置、二次分发或商业化前，应在每个方向目录放入 `license.txt`，记录模型名称、来源链接、许可证、转换/量化方式和修改日期；不要使用带非商业限制或来源不清的模型进入商业版本。
+
+### ONNX Runtime Android
+
+- 用途：在 Android 端执行 Marian ONNX 模型推理。
+- 依赖：`com.microsoft.onnxruntime:onnxruntime-android:1.22.0`
+- 上游：https://onnxruntime.ai/
+- 许可证：MIT License
+- 注意：该依赖要求 Android 7.0（API 24）及以上。
 
 ## Android 与 Kotlin 依赖
 

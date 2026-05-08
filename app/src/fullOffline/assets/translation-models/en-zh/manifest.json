@@ -1,1 +1,17 @@
-{"id":"en-zh","source":"en","target":"zh","engine":"onnx-marian-int8","status":"missing-model-files"}
+{
+  "id": "en-zh",
+  "source": "en",
+  "target": "zh",
+  "engine": "onnx-marian-quantized",
+  "repository": "onnx-community/opus-mt-en-zh",
+  "status": "ready",
+  "requiredFiles": [
+    "encoder_model_quantized.onnx",
+    "decoder_model_quantized.onnx",
+    "tokenizer.json",
+    "vocab.json",
+    "config.json",
+    "generation_config.json",
+    "license.txt"
+  ]
+}

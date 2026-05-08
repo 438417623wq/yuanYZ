@@ -1,0 +1,7 @@
+﻿Model: onnx-community/opus-mt-zh-en
+Direction: zh-en / 中文转英文
+Source: https://huggingface.co/onnx-community/opus-mt-zh-en
+Original family: OPUS-MT / MarianMT
+License: CC-BY 4.0, verify the upstream model card before commercial release.
+Conversion: ONNX quantized model files published by the Hugging Face onnx-community repository.
+Bundled files: encoder_model_quantized.onnx, decoder_model_quantized.onnx, tokenizer.json, vocab.json, source.spm, target.spm, config.json, generation_config.json.

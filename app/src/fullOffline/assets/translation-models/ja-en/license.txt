@@ -1,0 +1,7 @@
+﻿Model: Xenova/opus-mt-jap-en
+Direction: ja-en / 日文转英文
+Source: https://huggingface.co/Xenova/opus-mt-jap-en
+Original family: OPUS-MT / MarianMT
+License: CC-BY 4.0, verify the upstream model card before commercial release.
+Conversion: ONNX quantized model files published for Transformers.js / ONNX Runtime use.
+Bundled files: encoder_model_quantized.onnx, decoder_model_quantized.onnx, tokenizer.json, vocab.json, source.spm, target.spm, config.json, generation_config.json.

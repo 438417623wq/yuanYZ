@@ -1,22 +1,30 @@
 # Full Offline Translation Plan
 
-This project now has two APK editions:
+This project has two APK editions:
 
 - `standard`: normal app package without bundled subtitle translation weights.
 - `fullOffline`: full offline edition prepared for bundled local translation weights.
 
 ## Required Model Directions
 
-The full offline edition uses Chinese as the pivot language and expects six model directions:
+The full offline edition keeps six model direction slots and can route through English when a direct model is not present:
 
 - `en-zh`
 - `zh-en`
-- `ja-zh`
-- `zh-ja`
-- `ko-zh`
-- `zh-ko`
+- `en-ja`
+- `ja-en`
+- `ko-en`
+- `en-ko`
 
-This covers English, Chinese, Japanese, and Korean translation. Non-Chinese pairs can be routed through Chinese.
+Current bundled ONNX directions:
+
+- `en-zh`: ready, using `onnx-community/opus-mt-en-zh`
+- `zh-en`: ready, using `onnx-community/opus-mt-zh-en`
+- `en-ja`: ready, using `Xenova/opus-mt-en-jap`
+- `ja-en`: ready, using `Xenova/opus-mt-jap-en`
+- `ko-en`: ready, using `Xenova/opus-mt-ko-en`
+
+The `en-ko` slot is still present, but a public ONNX export has not been bundled yet. The app reports its exact missing files instead of pretending Korean output is available.
 
 ## Asset Layout
 
@@ -27,18 +35,21 @@ app/src/fullOffline/assets/translation-models/
 ├─ manifest.json
 ├─ en-zh/
 │  ├─ manifest.json
-│  ├─ model.onnx
+│  ├─ encoder_model_quantized.onnx
+│  ├─ decoder_model_quantized.onnx
 │  ├─ tokenizer.json
+│  ├─ vocab.json
+│  ├─ config.json
+│  ├─ generation_config.json
 │  └─ license.txt
 ├─ zh-en/
-├─ ja-zh/
-├─ zh-ja/
-├─ ko-zh/
-└─ zh-ko/
+├─ en-ja/
+├─ ja-en/
+├─ ko-en/
+└─ en-ko/
 ```
 
-The APK-side code checks for `manifest.json`, `tokenizer.json`, `license.txt`, and one model file in each directory.
-Accepted model file names are `model.onnx`, `model.int8.onnx`, `model.ort`, or `model.bin`.
+The APK-side code checks for `manifest.json`, `encoder_model_quantized.onnx`, `decoder_model_quantized.onnx`, `tokenizer.json`, `vocab.json`, `config.json`, `generation_config.json`, and `license.txt` in each directory.
 
 ## Build Commands
 
@@ -73,12 +84,14 @@ Recommended:
 
 ## Runtime Status
 
-The app already exposes subtitle translation UI, model readiness checks, and storage for translated subtitles. The actual ONNX/Marian runtime must be wired after real converted int8 model files are placed in the fullOffline asset directories.
+The app exposes subtitle translation UI, model readiness checks, translated subtitle storage, and Marian/ONNX greedy decoding through ONNX Runtime Android. On first use, bundled model files are copied from APK assets to the app no-backup files directory so ONNX Runtime can open them by file path.
 
 Current repository status:
 
 - Full offline APK flavor: implemented.
-- Model asset directories and manifest protocol: implemented.
+- English <-> Chinese ONNX Marian model files: bundled.
+- English <-> Japanese ONNX Marian model files: bundled.
+- Korean -> English ONNX Marian model file: bundled.
+- Marian tokenizer and greedy ONNX inference runtime: implemented.
 - Git LFS patterns and GitHub Actions build workflow: implemented.
-- Real translation model weights: not committed.
-- Marian/ONNX text generation runtime: not wired yet.
+- English -> Korean ONNX model file: not bundled yet.

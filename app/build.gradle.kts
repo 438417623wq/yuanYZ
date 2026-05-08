@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.yuanYZ"
-        minSdk = 23
+        minSdk = 24
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
@@ -24,6 +24,12 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            pickFirsts += "**/libonnxruntime.so"
+        }
     }
 
     flavorDimensions += "edition"
@@ -66,6 +72,7 @@ dependencies {
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
     implementation("com.alphacephei:vosk-android:0.3.47")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
@@ -75,19 +82,22 @@ tasks.register("checkFullOfflineTranslationModels") {
     description = "Checks whether the fullOffline flavor contains all required local translation model files."
     doLast {
         val root = project.file("src/fullOffline/assets/translation-models")
-        val directions = listOf("en-zh", "zh-en", "ja-zh", "zh-ja", "ko-zh", "zh-ko")
-        val modelFileNames = listOf("model.onnx", "model.int8.onnx", "model.ort", "model.bin")
+        val directions = listOf("en-zh", "zh-en", "en-ja", "ja-en", "ko-en", "en-ko")
         val missing = directions.flatMap { direction ->
             val dir = root.resolve(direction)
-            val requiredMissing = listOf("manifest.json", "tokenizer.json", "license.txt")
+            val requiredMissing = listOf(
+                "manifest.json",
+                "encoder_model_quantized.onnx",
+                "decoder_model_quantized.onnx",
+                "tokenizer.json",
+                "vocab.json",
+                "config.json",
+                "generation_config.json",
+                "license.txt"
+            )
                 .filterNot { dir.resolve(it).isFile }
                 .map { "$direction/$it" }
-            val modelMissing = if (modelFileNames.any { dir.resolve(it).isFile }) {
-                emptyList()
-            } else {
-                listOf("$direction/model.onnx or model.int8.onnx")
-            }
-            requiredMissing + modelMissing
+            requiredMissing
         }
         if (missing.isEmpty()) {
             println("All fullOffline translation models are present.")

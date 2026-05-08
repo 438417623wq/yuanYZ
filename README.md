@@ -31,16 +31,26 @@
 
 ## 全离线翻译版
 
-项目已预留 `fullOffline` 构建版本，用于把英文、中文、日文、韩文互译模型全部内置进 APK。
+项目已加入 `fullOffline` 构建版本，用于把本地翻译模型内置进 APK，并通过 ONNX Runtime Android 执行 Marian 推理。
 
-需要的模型方向：
+当前已内置并接入：
 
-- `en-zh`
-- `zh-en`
-- `ja-zh`
-- `zh-ja`
-- `ko-zh`
-- `zh-ko`
+- `en-zh`：英文转中文
+- `zh-en`：中文转英文
+- `en-ja`：英文转日文
+- `ja-en`：日文转英文
+- `ko-en`：韩文转英文
+
+当前通过中转支持：
+
+- 中文 ↔ 日文：通过英文中转
+- 韩文 -> 中文：通过英文中转
+
+预留但尚未找到公开 ONNX 权重：
+
+- `en-ko`：英文转韩文，因此中文/日文/英文转韩文暂不可用
+
+注意：接入 ONNX Runtime 后，最低 Android 版本调整为 Android 7.0（API 24）。
 
 模型目录规范见 [`docs/full-offline-translation.md`](docs/full-offline-translation.md)。
 
