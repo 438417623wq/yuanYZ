@@ -6,7 +6,6 @@ Model direction directories:
 - en-ja/
 - ja-en/
 - ko-en/
-- en-ko/
 
 Each directory must contain:
 - manifest.json
@@ -25,9 +24,9 @@ Current bundled ONNX directions:
 - ja-en
 - ko-en
 
-The en-ko direction keeps the same directory contract, but a public ONNX export
-has not been bundled yet. Chinese/Japanese routes are handled through English
-when a direct model is not present.
+Chinese/Japanese routes are handled through English when a direct model is not
+present. Korean is currently supported as a source language, not as a target
+language.
 
 The source repository should not commit large model files directly.
 Use Git LFS or attach the full offline APK/model pack to GitHub Releases.

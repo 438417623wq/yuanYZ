@@ -66,7 +66,7 @@
 - 推荐模型来源：https://github.com/Helsinki-NLP/OPUS-MT-train
 - 常见模型仓库：https://huggingface.co/Helsinki-NLP
 - 常见许可证：CC-BY 4.0，具体以每个模型目录内的 `license.txt` 和上游模型页为准。
-- 注意：`en-ko` 方向当前只保留规范和占位清单。正式内置、二次分发或商业化前，应在每个方向目录放入 `license.txt`，记录模型名称、来源链接、许可证、转换/量化方式和修改日期；不要使用带非商业限制或来源不清的模型进入商业版本。
+- 注意：正式内置、二次分发或商业化前，应在每个方向目录放入 `license.txt`，记录模型名称、来源链接、许可证、转换/量化方式和修改日期；不要使用带非商业限制或来源不清的模型进入商业版本。
 
 ### ONNX Runtime Android
 

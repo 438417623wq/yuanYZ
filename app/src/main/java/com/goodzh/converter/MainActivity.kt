@@ -285,6 +285,28 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         translationStatus = translationEngine.status()
     }
 
+    fun prepareTranslationModel(source: TranslationLanguage, target: TranslationLanguage) {
+        viewModelScope.launch {
+            busy = true
+            progress = 0f
+            statusText = "正在启动本地翻译模型..."
+            runCatching {
+                translationEngine.prepareRoute(source, target) { value, message ->
+                    progress = value
+                    statusText = message
+                }
+            }.onSuccess {
+                refreshTranslationStatus()
+                progress = 1f
+                statusText = "本地翻译模型已就绪：${source.label} -> ${target.label}"
+            }.onFailure { error ->
+                refreshTranslationStatus()
+                statusText = "本地翻译模型启动失败：${error.message ?: "未知错误"}"
+            }
+            busy = false
+        }
+    }
+
     fun importModel(uri: Uri) {
         viewModelScope.launch {
             busy = true
@@ -587,10 +609,12 @@ fun ConverterApp(
             session = editorSession,
             videoRecords = videoRecords,
             translationStatus = viewModel.translationStatus,
+            translationBusy = viewModel.busy,
             onClose = viewModel::closeVideoEditor,
             onSave = viewModel::saveVideoSubtitles,
             onReplaceVideo = viewModel::replaceVideoEditorUri,
             onSwitchVideo = viewModel::switchVideoEditor,
+            onPrepareTranslationModel = viewModel::prepareTranslationModel,
             onTranslate = viewModel::translateVideoSubtitles
         )
         return
@@ -1262,10 +1286,12 @@ fun VideoSubtitleEditorScreen(
     session: VideoEditSession,
     videoRecords: List<ConversionRecord>,
     translationStatus: TranslationModelStatus,
+    translationBusy: Boolean,
     onClose: () -> Unit,
     onSave: (List<SubtitleSegment>) -> Unit,
     onReplaceVideo: (Uri, List<SubtitleSegment>) -> Unit,
     onSwitchVideo: (ConversionRecord, List<SubtitleSegment>?) -> Unit,
+    onPrepareTranslationModel: (TranslationLanguage, TranslationLanguage) -> Unit,
     onTranslate: (TranslationLanguage, TranslationLanguage, TranslationApplyMode, List<SubtitleSegment>) -> Unit
 ) {
     val context = LocalContext.current
@@ -1886,7 +1912,9 @@ fun VideoSubtitleEditorScreen(
     if (showTranslationDialog) {
         SubtitleTranslationDialog(
             status = translationStatus,
+            busy = translationBusy,
             onDismiss = { showTranslationDialog = false },
+            onPrepare = onPrepareTranslationModel,
             onTranslate = { source, target, mode ->
                 showTranslationDialog = false
                 onTranslate(source, target, mode, segments)
@@ -1898,18 +1926,30 @@ fun VideoSubtitleEditorScreen(
 @Composable
 fun SubtitleTranslationDialog(
     status: TranslationModelStatus,
+    busy: Boolean,
     onDismiss: () -> Unit,
+    onPrepare: (TranslationLanguage, TranslationLanguage) -> Unit,
     onTranslate: (TranslationLanguage, TranslationLanguage, TranslationApplyMode) -> Unit
 ) {
     var source by remember { mutableStateOf(TranslationLanguage.English) }
     var target by remember { mutableStateOf(TranslationLanguage.Chinese) }
     var mode by remember { mutableStateOf(TranslationApplyMode.Bilingual) }
     val selectedRoute = status.route(source, target)
+    val routeReady = status.hasModelRoute(source, target)
     val canTranslate = status.canTranslate(source, target)
     val statusText = when {
         !status.fullOfflineBuild -> "当前是标准版，请打包 fullOffline 版并内置翻译模型。"
         canTranslate -> "当前路线可用：${selectedRoute.joinToString(" + ") { it.id }}"
         else -> status.unavailableReason(source, target)
+    }
+    val availableTargets = TranslationLanguage.entries.filter { language ->
+        language != source && status.hasModelRoute(source, language)
+    }
+
+    LaunchedEffect(source, status) {
+        if (availableTargets.isNotEmpty() && target !in availableTargets) {
+            target = availableTargets.first()
+        }
     }
 
     AlertDialog(
@@ -1917,6 +1957,9 @@ fun SubtitleTranslationDialog(
         title = { Text("翻译字幕") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (busy) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
                 Text(
                     statusText,
                     color = if (canTranslate) Color(0xFF0F766E) else Color(0xFFB45309),
@@ -1938,9 +1981,11 @@ fun SubtitleTranslationDialog(
                 Text("目标语言", fontWeight = FontWeight.SemiBold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     TranslationLanguage.entries.forEach { language ->
+                        val enabled = language != source && status.hasModelRoute(source, language)
                         FilterChip(
                             selected = target == language,
-                            onClick = { target = language },
+                            enabled = enabled,
+                            onClick = { if (enabled) target = language },
                             label = { Text(language.label) }
                         )
                     }
@@ -1958,11 +2003,21 @@ fun SubtitleTranslationDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                enabled = canTranslate,
-                onClick = { onTranslate(source, target, mode) }
-            ) {
-                Text("开始翻译")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (routeReady && !canTranslate) {
+                    TextButton(
+                        enabled = !busy,
+                        onClick = { onPrepare(source, target) }
+                    ) {
+                        Text(if (busy) "启动中" else "启动模型")
+                    }
+                }
+                TextButton(
+                    enabled = canTranslate && !busy,
+                    onClick = { onTranslate(source, target, mode) }
+                ) {
+                    Text("开始翻译")
+                }
             }
         },
         dismissButton = {

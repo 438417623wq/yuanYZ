@@ -38,6 +38,7 @@ data class TranslationDirectionStatus(
 data class TranslationModelStatus(
     val fullOfflineBuild: Boolean,
     val runtimeReady: Boolean,
+    val runtimeError: String?,
     val directions: List<TranslationDirectionStatus>
 ) {
     val readyDirections: List<String> get() = directions.filter { it.ready }.map { it.id }
@@ -55,15 +56,19 @@ data class TranslationModelStatus(
             if (source.code != pivot && target.code != pivot) {
                 val first = directionsById["${source.code}-$pivot"]
                 val second = directionsById["$pivot-${target.code}"]
-                if (first != null || second != null) return listOfNotNull(first, second)
+                if (first != null && second != null) return listOf(first, second)
             }
         }
         return emptyList()
     }
 
-    fun canTranslate(source: TranslationLanguage, target: TranslationLanguage): Boolean {
+    fun hasModelRoute(source: TranslationLanguage, target: TranslationLanguage): Boolean {
         val route = route(source, target)
-        return source != target && fullOfflineBuild && runtimeReady && route.isNotEmpty() && route.all { it.ready }
+        return source != target && fullOfflineBuild && route.isNotEmpty() && route.all { it.ready }
+    }
+
+    fun canTranslate(source: TranslationLanguage, target: TranslationLanguage): Boolean {
+        return hasModelRoute(source, target) && runtimeReady
     }
 
     fun unavailableReason(source: TranslationLanguage, target: TranslationLanguage): String {
@@ -77,10 +82,18 @@ data class TranslationModelStatus(
                 "${direction.id} 缺少：${direction.missingFiles.joinToString("、")}"
             }
         }
-        if (!runtimeReady) return "ONNX Runtime 未能初始化，无法执行本地翻译推理。"
+        if (!runtimeReady) {
+            return runtimeError?.let { "ONNX Runtime 未能初始化：$it" }
+                ?: "ONNX Runtime 未能初始化，无法执行本地翻译推理。"
+        }
         return ""
     }
 }
+
+private data class TranslationRuntimeReadiness(
+    val ready: Boolean,
+    val errorMessage: String?
+)
 
 data class TranslationResult(
     val sourceText: String,
@@ -90,11 +103,32 @@ data class TranslationResult(
 class LocalTranslationEngine(private val context: Context) {
     fun status(): TranslationModelStatus {
         val directions = requiredDirections.map { inspectDirection(it) }
+        val runtime = runtimeReadiness()
         return TranslationModelStatus(
             fullOfflineBuild = BuildConfig.FULL_OFFLINE_TRANSLATION,
-            runtimeReady = isRuntimeReady(),
+            runtimeReady = runtime.ready,
+            runtimeError = runtime.errorMessage,
             directions = directions
         )
+    }
+
+    suspend fun prepareRoute(
+        source: TranslationLanguage,
+        target: TranslationLanguage,
+        onProgress: (Float, String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val currentStatus = status()
+        if (!currentStatus.hasModelRoute(source, target)) {
+            error(currentStatus.unavailableReason(source, target))
+        }
+        val route = currentStatus.route(source, target)
+        val total = route.size.coerceAtLeast(1)
+        route.forEachIndexed { index, direction ->
+            onProgress(index.toFloat() / total, "正在启动 ${direction.label} 模型")
+            createDirectionRuntime(direction.id).use {
+                onProgress((index + 1).toFloat() / total, "${direction.label} 模型已就绪")
+            }
+        }
     }
 
     suspend fun translateLines(
@@ -196,17 +230,22 @@ class LocalTranslationEngine(private val context: Context) {
         return runCatching { context.assets.list(base)?.toSet().orEmpty() }.getOrDefault(emptySet())
     }
 
-    private fun isRuntimeReady(): Boolean =
+    private fun runtimeReadiness(): TranslationRuntimeReadiness =
         runCatching {
             OrtEnvironment.getEnvironment()
-            true
-        }.getOrDefault(false)
+            TranslationRuntimeReadiness(ready = true, errorMessage = null)
+        }.getOrElse { error ->
+            TranslationRuntimeReadiness(
+                ready = false,
+                errorMessage = error.message ?: error::class.java.simpleName
+            )
+        }
 
     companion object {
         private const val assetRoot = "translation-models"
         private const val encoderModelFile = "encoder_model_quantized.onnx"
         private const val decoderModelFile = "decoder_model_quantized.onnx"
-        val requiredDirections = listOf("en-zh", "zh-en", "en-ja", "ja-en", "ko-en", "en-ko")
+        val requiredDirections = listOf("en-zh", "zh-en", "en-ja", "ja-en", "ko-en")
         private val requiredFiles = listOf(
             "manifest.json",
             encoderModelFile,

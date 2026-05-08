@@ -54,6 +54,7 @@ kotlin {
 }
 
 dependencies {
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
     implementation(files("libs/sherpa-onnx-1.13.0.aar"))
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.core:core-ktx:1.15.0")
@@ -72,7 +73,6 @@ dependencies {
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
     implementation("com.alphacephei:vosk-android:0.3.47")
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
@@ -82,7 +82,7 @@ tasks.register("checkFullOfflineTranslationModels") {
     description = "Checks whether the fullOffline flavor contains all required local translation model files."
     doLast {
         val root = project.file("src/fullOffline/assets/translation-models")
-        val directions = listOf("en-zh", "zh-en", "en-ja", "ja-en", "ko-en", "en-ko")
+        val directions = listOf("en-zh", "zh-en", "en-ja", "ja-en", "ko-en")
         val missing = directions.flatMap { direction ->
             val dir = root.resolve(direction)
             val requiredMissing = listOf(

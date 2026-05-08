@@ -59,14 +59,6 @@
       "repository": "Xenova/opus-mt-ko-en",
       "license": "CC-BY 4.0",
       "status": "ready"
-    },
-    {
-      "id": "en-ko",
-      "name": "英文转韩文",
-      "source": "en",
-      "target": "ko",
-      "license": "CC-BY 4.0",
-      "status": "missing-public-onnx-export"
     }
   ]
 }

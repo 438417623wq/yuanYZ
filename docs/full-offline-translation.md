@@ -7,14 +7,13 @@ This project has two APK editions:
 
 ## Required Model Directions
 
-The full offline edition keeps six model direction slots and can route through English when a direct model is not present:
+The full offline edition keeps five model direction slots and can route through English when a direct model is not present:
 
 - `en-zh`
 - `zh-en`
 - `en-ja`
 - `ja-en`
 - `ko-en`
-- `en-ko`
 
 Current bundled ONNX directions:
 
@@ -24,7 +23,7 @@ Current bundled ONNX directions:
 - `ja-en`: ready, using `Xenova/opus-mt-jap-en`
 - `ko-en`: ready, using `Xenova/opus-mt-ko-en`
 
-The `en-ko` slot is still present, but a public ONNX export has not been bundled yet. The app reports its exact missing files instead of pretending Korean output is available.
+Korean is currently supported as a source language. Korean output is disabled in the app because no English-to-Korean ONNX model is bundled.
 
 ## Asset Layout
 
@@ -45,8 +44,7 @@ app/src/fullOffline/assets/translation-models/
 ├─ zh-en/
 ├─ en-ja/
 ├─ ja-en/
-├─ ko-en/
-└─ en-ko/
+└─ ko-en/
 ```
 
 The APK-side code checks for `manifest.json`, `encoder_model_quantized.onnx`, `decoder_model_quantized.onnx`, `tokenizer.json`, `vocab.json`, `config.json`, `generation_config.json`, and `license.txt` in each directory.
@@ -94,4 +92,3 @@ Current repository status:
 - Korean -> English ONNX Marian model file: bundled.
 - Marian tokenizer and greedy ONNX inference runtime: implemented.
 - Git LFS patterns and GitHub Actions build workflow: implemented.
-- English -> Korean ONNX model file: not bundled yet.
