@@ -71,7 +71,7 @@
 ### ONNX Runtime Android
 
 - 用途：在 Android 端执行 Marian ONNX 模型推理。
-- 依赖：`com.microsoft.onnxruntime:onnxruntime-android:1.22.0`
+- 依赖：`com.microsoft.onnxruntime:onnxruntime-android:1.24.3`
 - 上游：https://onnxruntime.ai/
 - 许可证：MIT License
 - 注意：该依赖要求 Android 7.0（API 24）及以上。
