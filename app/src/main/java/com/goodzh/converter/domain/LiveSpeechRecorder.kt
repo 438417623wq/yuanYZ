@@ -32,6 +32,7 @@ import kotlin.math.sqrt
 sealed interface LiveSpeechRecorderEvent {
     data class Ready(val message: String) : LiveSpeechRecorderEvent
     data class Status(val message: String) : LiveSpeechRecorderEvent
+    data class Level(val value: Float) : LiveSpeechRecorderEvent
     data class Result(val text: String) : LiveSpeechRecorderEvent
     data class Finished(val message: String) : LiveSpeechRecorderEvent
 }
@@ -91,6 +92,7 @@ class LiveSpeechRecorder(private val context: Context) {
                 if (read == 0) continue
 
                 val rms = rms(readBuffer, read)
+                onEvent(LiveSpeechRecorderEvent.Level(visualLevel(rms)))
                 if (rms > voiceRmsThreshold) hasDetectedVoice = true
                 val samples = shortBufferToFloat(readBuffer, read, noiseSuppression)
                 writer?.writeFloat(samples)
@@ -282,6 +284,11 @@ private fun rms(buffer: ShortArray, read: Int): Float {
         sum += value * value
     }
     return sqrt(sum / read).toFloat()
+}
+
+private fun visualLevel(rms: Float): Float {
+    val normalized = ((rms - 0.002f) / 0.08f).coerceIn(0f, 1f)
+    return sqrt(normalized.toDouble()).toFloat().coerceIn(0.04f, 1f)
 }
 
 private fun audioReadError(code: Int): String = when (code) {

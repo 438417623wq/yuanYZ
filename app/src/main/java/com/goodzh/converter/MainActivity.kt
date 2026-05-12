@@ -21,6 +21,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -102,6 +103,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -164,6 +169,8 @@ import java.text.SimpleDateFormat
 import java.io.File
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -224,6 +231,13 @@ enum class VideoAudioExportFormat(
     Wav("WAV 兼容", "wav", "audio/wav")
 }
 
+private const val AUDIO_WAVEFORM_BAR_COUNT = 24
+
+private fun defaultWaveformLevels(): List<Float> =
+    List(AUDIO_WAVEFORM_BAR_COUNT) { index ->
+        0.08f + ((index % 4) * 0.015f)
+    }
+
 data class LiveSpeechUiState(
     val active: Boolean = false,
     val listening: Boolean = false,
@@ -232,6 +246,7 @@ data class LiveSpeechUiState(
     val noiseSuppression: Boolean = true,
     val draft: String = "",
     val partial: String = "",
+    val waveformLevels: List<Float> = defaultWaveformLevels(),
     val notice: String? = null
 ) {
     val preview: String get() = buildLiveSpeechPreview(draft, partial)
@@ -276,6 +291,8 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         private set
     var liveSpeechState by mutableStateOf(LiveSpeechUiState())
         private set
+    var audioRecognitionWaveformActive by mutableStateOf(false)
+        private set
     var activeVideoEditor by mutableStateOf<VideoEditSession?>(null)
         private set
     var activeTextNote by mutableStateOf<TextNoteSession?>(null)
@@ -299,6 +316,9 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                 statusText = state.message
                 if (state.resultText.isNotBlank()) {
                     currentText = state.resultText
+                }
+                if (!state.running) {
+                    audioRecognitionWaveformActive = false
                 }
             }
         }
@@ -358,6 +378,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
+        audioRecognitionWaveformActive = false
         liveSpeechJob?.cancel()
         if (!liveSpeechAudioSaved) {
             liveSpeechAudioFile?.delete()
@@ -371,6 +392,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             listening = false,
             paused = false,
             partial = "",
+            waveformLevels = defaultWaveformLevels(),
             notice = "正在启动本地麦克风..."
         )
 
@@ -420,6 +442,11 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                     listening = true,
                     paused = false,
                     notice = event.message
+                )
+            }
+            is LiveSpeechRecorderEvent.Level -> {
+                liveSpeechState = liveSpeechState.copy(
+                    waveformLevels = appendWaveformLevel(liveSpeechState.waveformLevels, event.value)
                 )
             }
             is LiveSpeechRecorderEvent.Result -> {
@@ -555,6 +582,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         busy = true
+        audioRecognitionWaveformActive = false
         progress = 0f
         currentText = ""
         statusText = "视频后台转换已开始，可切到后台继续"
@@ -563,6 +591,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun recognizeImage(uri: Uri) {
         busy = true
+        audioRecognitionWaveformActive = false
         progress = 0f
         currentText = ""
         statusText = "图片后台识别已开始，可切到后台继续"
@@ -576,6 +605,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         busy = true
+        audioRecognitionWaveformActive = true
         progress = 0f
         currentText = ""
         statusText = "音频后台转换已开始，可切到后台继续"
@@ -584,6 +614,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun exportVideoAudio(videoUri: Uri, outputUri: Uri, format: VideoAudioExportFormat) {
         busy = true
+        audioRecognitionWaveformActive = false
         progress = 0f
         currentText = ""
         statusText = "视频转音频后台导出已开始，可切到后台继续"
@@ -1084,6 +1115,7 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
                     listening = liveSpeechState.listening,
                     paused = liveSpeechState.paused,
                     draft = liveSpeechPreview,
+                    waveformLevels = liveSpeechState.waveformLevels,
                     notice = liveSpeechState.notice,
                     onContinuousChange = viewModel::updateLiveSpeechContinuous,
                     onNoiseSuppressionChange = viewModel::updateLiveSpeechNoiseSuppression,
@@ -1101,6 +1133,7 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
                 progress = viewModel.progress,
                 status = resultStatus,
                 text = resultText,
+                showAudioWaveform = viewModel.audioRecognitionWaveformActive && viewModel.busy,
                 onCopy = {
                     val text = resultText
                     if (text.isNotBlank()) clipboard.setText(AnnotatedString(text))
@@ -1248,6 +1281,7 @@ fun LiveSpeechRecorderCard(
     listening: Boolean,
     paused: Boolean,
     draft: String,
+    waveformLevels: List<Float>,
     notice: String?,
     onContinuousChange: (Boolean) -> Unit,
     onNoiseSuppressionChange: (Boolean) -> Unit,
@@ -1293,6 +1327,15 @@ fun LiveSpeechRecorderCard(
                 }
                 Switch(checked = noiseSuppression, onCheckedChange = onNoiseSuppressionChange)
             }
+
+            AudioWaveformBars(
+                levels = waveformLevels,
+                active = listening,
+                simulated = false,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(82.dp)
+            )
 
             Text(
                 draft.ifBlank { "识别内容会先保存在这里，点击保存后进入历史记录" },
@@ -2522,11 +2565,68 @@ fun ToolCard(
 }
 
 @Composable
+fun AudioWaveformBars(
+    levels: List<Float>,
+    active: Boolean,
+    simulated: Boolean,
+    modifier: Modifier = Modifier,
+    barCount: Int = AUDIO_WAVEFORM_BAR_COUNT
+) {
+    var frame by remember { mutableIntStateOf(0) }
+    LaunchedEffect(active, simulated) {
+        if (!simulated) return@LaunchedEffect
+        while (active) {
+            delay(90)
+            frame += 1
+        }
+    }
+
+    val visibleLevels = if (simulated) {
+        simulatedWaveformLevels(frame, barCount)
+    } else {
+        normalizeWaveformLevels(levels, barCount)
+    }
+    val gradientColors = listOf(
+        Color(0xFFDC2626),
+        Color(0xFFFACC15),
+        Color(0xFF22C55E),
+        Color(0xFF06B6D4),
+        Color(0xFF2563EB),
+        Color(0xFFD946EF),
+        Color(0xFFE11D48)
+    )
+
+    Canvas(modifier = modifier) {
+        if (barCount <= 0) return@Canvas
+        val gap = size.width / (barCount * 2.8f)
+        val barWidth = ((size.width - gap * (barCount - 1)) / barCount).coerceAtLeast(2f)
+        val minHeight = size.height * 0.08f
+        visibleLevels.take(barCount).forEachIndexed { index, rawLevel ->
+            val level = rawLevel.coerceIn(0.04f, 1f)
+            val barHeight = (size.height * level).coerceAtLeast(minHeight)
+            val left = index * (barWidth + gap)
+            val top = size.height - barHeight
+            drawRoundRect(
+                brush = Brush.verticalGradient(
+                    colors = gradientColors,
+                    startY = top,
+                    endY = size.height
+                ),
+                topLeft = Offset(left, top),
+                size = Size(barWidth, barHeight),
+                cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
+            )
+        }
+    }
+}
+
+@Composable
 fun ResultPanel(
     busy: Boolean,
     progress: Float,
     status: String,
     text: String,
+    showAudioWaveform: Boolean = false,
     onCopy: () -> Unit,
     onShare: () -> Unit,
     onOpenFull: () -> Unit
@@ -2551,6 +2651,16 @@ fun ResultPanel(
             }
             Text(status, color = Color(0xFF64748B), style = MaterialTheme.typography.bodyMedium)
             if (busy) LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+            if (showAudioWaveform) {
+                AudioWaveformBars(
+                    levels = emptyList(),
+                    active = busy,
+                    simulated = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(78.dp)
+                )
+            }
             Surface(
                 color = Color(0xFFF1F5F9),
                 shape = RoundedCornerShape(8.dp),
@@ -2723,6 +2833,35 @@ private fun videoAudioOutputName(context: Context, videoUri: Uri?, format: Video
         .ifBlank { "视频音频" }
         .replace(Regex("[\\\\/:*?\"<>|]"), "_")
     return "$baseName-音频.${format.extension}"
+}
+
+private fun appendWaveformLevel(current: List<Float>, level: Float): List<Float> {
+    val normalized = normalizeWaveformLevels(current, AUDIO_WAVEFORM_BAR_COUNT)
+    return normalized.drop(1) + level.coerceIn(0.04f, 1f)
+}
+
+private fun normalizeWaveformLevels(levels: List<Float>, barCount: Int): List<Float> {
+    if (barCount <= 0) return emptyList()
+    val source = when {
+        levels.isEmpty() -> defaultWaveformLevels()
+        levels.size == barCount -> levels
+        levels.size > barCount -> levels.takeLast(barCount)
+        else -> List(barCount - levels.size) { 0.08f } + levels
+    }
+    return source.map { it.coerceIn(0.04f, 1f) }
+}
+
+private fun simulatedWaveformLevels(frame: Int, barCount: Int): List<Float> {
+    if (barCount <= 0) return emptyList()
+    val center = (barCount - 1).toFloat() / 2f
+    return List(barCount) { index ->
+        val distance = if (center <= 0f) 0f else abs(index - center) / center
+        val phase = frame * 0.46 + index * 0.78
+        val pulse = frame * 0.19 + index * 0.35
+        val wave = ((sin(phase) + 1.0) / 2.0).toFloat()
+        val accent = ((sin(pulse) + 1.0) / 2.0).toFloat()
+        (0.14f + wave * 0.52f + accent * 0.18f - distance * 0.16f).coerceIn(0.06f, 0.98f)
+    }
 }
 
 private fun buildLiveSpeechPreview(draft: String, partial: String): String {
