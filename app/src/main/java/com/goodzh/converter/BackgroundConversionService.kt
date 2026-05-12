@@ -101,6 +101,8 @@ class BackgroundConversionService : Service() {
         val repository = app.repository
         val type = intent.getStringExtra(EXTRA_TYPE)?.let { ConversionType.valueOf(it) } ?: return finishService()
         val uri = Uri.parse(intent.getStringExtra(EXTRA_URI) ?: return finishService())
+        val outputUri = intent.getStringExtra(EXTRA_OUTPUT_URI)?.let(Uri::parse)
+        val audioFormat = intent.getStringExtra(EXTRA_AUDIO_FORMAT) ?: "m4a"
         val language = intent.getStringExtra(EXTRA_LANGUAGE)?.let { SpeechLanguage.valueOf(it) } ?: SpeechLanguage.Mandarin
         val mode = intent.getStringExtra(EXTRA_PERFORMANCE)?.let { PerformanceMode.valueOf(it) } ?: PerformanceMode.Balanced
         val title = displayName(this, uri)
@@ -108,6 +110,7 @@ class BackgroundConversionService : Service() {
             type = type,
             title = title,
             sourceUri = uri.toString(),
+            outputUri = outputUri?.toString().orEmpty(),
             resultText = "",
             status = ConversionStatus.Pending,
             message = "后台转换中"
@@ -121,11 +124,13 @@ class BackgroundConversionService : Service() {
                 ConversionType.Video -> convertVideo(uri, language, mode)
                 ConversionType.Audio -> convertAudio(uri, language, mode)
                 ConversionType.Image -> convertImage(uri, mode)
+                ConversionType.VideoAudio -> convertVideoAudio(uri, outputUri ?: error("请选择音频保存位置"), audioFormat)
             }
         }.onSuccess { result ->
             repository.update(
                 pending.copy(
                     resultText = result.text,
+                    outputUri = result.outputUri.ifBlank { pending.outputUri },
                     segmentsJson = result.segmentsJson,
                     status = ConversionStatus.Success,
                     message = ""
@@ -195,6 +200,25 @@ class BackgroundConversionService : Service() {
         val text = OcrConverter(this).recognize(uri, mode.profile)
         updateProgress("图片后台识别完成", 1f)
         return ConversionResult(text = text.ifBlank { "未识别到文字" })
+    }
+
+    private suspend fun convertVideoAudio(uri: Uri, outputUri: Uri, format: String): ConversionResult {
+        val extractor = VideoAudioExtractor(this)
+        val normalizedFormat = format.lowercase(Locale.US)
+        when (normalizedFormat) {
+            "wav" -> extractor.exportToWav(uri, outputUri) { value ->
+                checkCancelled()
+                updateProgress("正在导出 WAV 音频 ${(value * 100).toInt()}%", value)
+            }
+            else -> extractor.exportToM4a(uri, outputUri) { value ->
+                checkCancelled()
+                updateProgress("正在导出 M4A 音频 ${(value * 100).toInt()}%", value)
+            }
+        }
+        return ConversionResult(
+            text = "音频导出完成：${normalizedFormat.uppercase(Locale.US)}",
+            outputUri = outputUri.toString()
+        )
     }
 
     private fun checkCancelled() {
@@ -293,6 +317,8 @@ class BackgroundConversionService : Service() {
         private const val ACTION_CANCEL = "com.goodzh.converter.action.CANCEL_BACKGROUND_CONVERSION"
         private const val EXTRA_TYPE = "type"
         private const val EXTRA_URI = "uri"
+        private const val EXTRA_OUTPUT_URI = "output_uri"
+        private const val EXTRA_AUDIO_FORMAT = "audio_format"
         private const val EXTRA_LANGUAGE = "language"
         private const val EXTRA_PERFORMANCE = "performance"
 
@@ -301,12 +327,16 @@ class BackgroundConversionService : Service() {
             type: ConversionType,
             uri: Uri,
             language: SpeechLanguage?,
-            performanceMode: PerformanceMode
+            performanceMode: PerformanceMode,
+            outputUri: Uri? = null,
+            audioFormat: String? = null
         ) {
             val intent = Intent(context, BackgroundConversionService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_TYPE, type.name)
                 putExtra(EXTRA_URI, uri.toString())
+                outputUri?.let { putExtra(EXTRA_OUTPUT_URI, it.toString()) }
+                audioFormat?.let { putExtra(EXTRA_AUDIO_FORMAT, it) }
                 language?.let { putExtra(EXTRA_LANGUAGE, it.name) }
                 putExtra(EXTRA_PERFORMANCE, performanceMode.name)
             }
@@ -317,7 +347,8 @@ class BackgroundConversionService : Service() {
 
 private data class ConversionResult(
     val text: String,
-    val segmentsJson: String = ""
+    val segmentsJson: String = "",
+    val outputUri: String = ""
 )
 
 private data class ServiceSubtitleSegment(

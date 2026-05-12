@@ -57,6 +57,7 @@ private fun List<ConversionRecord>.toJson(): JSONArray {
                 .put("type", record.type.name)
                 .put("title", record.title)
                 .put("sourceUri", record.sourceUri)
+                .put("outputUri", record.outputUri)
                 .put("resultText", record.resultText)
                 .put("segmentsJson", record.segmentsJson)
                 .put("translatedText", record.translatedText)
@@ -76,6 +77,7 @@ private fun JSONObject.toRecord(): ConversionRecord =
         type = ConversionType.valueOf(optString("type", ConversionType.Image.name)),
         title = optString("title", "未命名文件"),
         sourceUri = optString("sourceUri", ""),
+        outputUri = optString("outputUri", ""),
         resultText = optString("resultText", ""),
         segmentsJson = optString("segmentsJson", ""),
         translatedText = optString("translatedText", ""),

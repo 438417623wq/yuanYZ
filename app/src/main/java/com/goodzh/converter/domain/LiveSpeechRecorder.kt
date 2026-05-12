@@ -20,8 +20,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 sealed interface LiveSpeechRecorderEvent {
@@ -36,6 +41,7 @@ class LiveSpeechRecorder(private val context: Context) {
         language: SpeechLanguage,
         profile: PerformanceProfile,
         noiseSuppression: Boolean,
+        audioOutput: File?,
         continuous: () -> Boolean,
         onEvent: suspend (LiveSpeechRecorderEvent) -> Unit
     ) = withContext(Dispatchers.IO) {
@@ -50,7 +56,9 @@ class LiveSpeechRecorder(private val context: Context) {
         val recognizer = createRecognizer(language.modelCode, profile.speechThreads)
         var audioRecord: AudioRecord? = null
         var effects: AudioEffects? = null
+        var writer: LiveWavWriter? = null
         try {
+            writer = audioOutput?.let { LiveWavWriter(it) }
             audioRecord = createAudioRecord()
             effects = AudioEffects.create(audioRecord.audioSessionId, noiseSuppression)
             audioRecord.startRecording()
@@ -85,6 +93,7 @@ class LiveSpeechRecorder(private val context: Context) {
                 val rms = rms(readBuffer, read)
                 if (rms > voiceRmsThreshold) hasDetectedVoice = true
                 val samples = shortBufferToFloat(readBuffer, read, noiseSuppression)
+                writer?.writeFloat(samples)
                 samples.forEach { pending.add(it) }
 
                 if (pending.size >= chunkSamples) {
@@ -120,6 +129,7 @@ class LiveSpeechRecorder(private val context: Context) {
             )
         } finally {
             runCatching { audioRecord?.stop() }
+            writer?.finish()
             effects?.release()
             audioRecord?.release()
             recognizer.release()
@@ -279,6 +289,54 @@ private fun audioReadError(code: Int): String = when (code) {
     AudioRecord.ERROR_BAD_VALUE -> "录音读取失败，设备返回了无效数据"
     AudioRecord.ERROR_DEAD_OBJECT -> "录音服务已断开，请重新开始录音"
     else -> "录音读取失败：$code"
+}
+
+private class LiveWavWriter(private val file: File) {
+    private val raf: RandomAccessFile
+    private var bytesWritten = 0
+
+    init {
+        file.parentFile?.mkdirs()
+        raf = RandomAccessFile(file, "rw")
+        raf.setLength(0)
+        raf.write(ByteArray(44))
+    }
+
+    fun writeFloat(samples: FloatArray) {
+        if (samples.isEmpty()) return
+        val shorts = ShortArray(samples.size) {
+            (samples[it].coerceIn(-1f, 1f) * Short.MAX_VALUE).roundToInt().toShort()
+        }
+        val bytes = ByteArray(shorts.size * 2)
+        ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(shorts)
+        raf.write(bytes)
+        bytesWritten += bytes.size
+    }
+
+    fun finish() {
+        raf.seek(0)
+        raf.write("RIFF".toByteArray())
+        raf.writeIntLe(36 + bytesWritten)
+        raf.write("WAVEfmt ".toByteArray())
+        raf.writeIntLe(16)
+        raf.writeShortLe(1)
+        raf.writeShortLe(1)
+        raf.writeIntLe(16_000)
+        raf.writeIntLe(16_000 * 2)
+        raf.writeShortLe(2)
+        raf.writeShortLe(16)
+        raf.write("data".toByteArray())
+        raf.writeIntLe(bytesWritten)
+        raf.close()
+    }
+}
+
+private fun RandomAccessFile.writeIntLe(value: Int) {
+    write(byteArrayOf(value.toByte(), (value shr 8).toByte(), (value shr 16).toByte(), (value shr 24).toByte()))
+}
+
+private fun RandomAccessFile.writeShortLe(value: Int) {
+    write(byteArrayOf(value.toByte(), (value shr 8).toByte()))
 }
 
 private fun String.cleanupSenseVoiceText(): String =

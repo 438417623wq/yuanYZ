@@ -3,6 +3,7 @@ package com.goodzh.converter
 import android.Manifest
 import android.app.Activity
 import android.app.Application
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -115,6 +116,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -159,6 +161,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
+import java.io.File
 import java.util.Date
 import java.util.Locale
 
@@ -212,6 +215,15 @@ enum class SubtitleDisplayMode(val label: String) {
     Bilingual("双语")
 }
 
+enum class VideoAudioExportFormat(
+    val label: String,
+    val extension: String,
+    val mimeType: String
+) {
+    M4a("M4A/AAC 推荐", "m4a", "audio/mp4"),
+    Wav("WAV 兼容", "wav", "audio/wav")
+}
+
 data class LiveSpeechUiState(
     val active: Boolean = false,
     val listening: Boolean = false,
@@ -235,6 +247,8 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
     private val translationEngine = LocalTranslationEngine(application)
     private val settings = application.getSharedPreferences("goodzh_settings", Context.MODE_PRIVATE)
     private var liveSpeechJob: Job? = null
+    private var liveSpeechAudioFile: File? = null
+    private var liveSpeechAudioSaved = false
     @Volatile private var liveSpeechShouldRun = false
     @Volatile private var liveSpeechContinuous = true
 
@@ -345,6 +359,11 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         }
 
         liveSpeechJob?.cancel()
+        if (!liveSpeechAudioSaved) {
+            liveSpeechAudioFile?.delete()
+        }
+        liveSpeechAudioFile = createLiveSpeechAudioFile()
+        liveSpeechAudioSaved = false
         liveSpeechShouldRun = true
         liveSpeechContinuous = liveSpeechState.continuous
         liveSpeechState = liveSpeechState.copy(
@@ -357,12 +376,14 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
 
         val noiseSuppression = liveSpeechState.noiseSuppression
         val profile = performanceMode.profile
+        val audioOutput = liveSpeechAudioFile
         liveSpeechJob = viewModelScope.launch {
             runCatching {
                 liveSpeechRecorder.record(
                     language = SpeechLanguage.Mandarin,
                     profile = profile,
                     noiseSuppression = noiseSuppression,
+                    audioOutput = audioOutput,
                     continuous = { liveSpeechShouldRun && liveSpeechContinuous },
                     onEvent = { event ->
                         withContext(Dispatchers.Main) {
@@ -444,6 +465,11 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         liveSpeechShouldRun = false
         liveSpeechJob?.cancel()
         liveSpeechJob = null
+        if (!liveSpeechAudioSaved) {
+            liveSpeechAudioFile?.delete()
+        }
+        liveSpeechAudioFile = null
+        liveSpeechAudioSaved = false
         liveSpeechState = LiveSpeechUiState(
             continuous = liveSpeechState.continuous,
             noiseSuppression = liveSpeechState.noiseSuppression
@@ -456,12 +482,26 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             liveSpeechState = liveSpeechState.copy(notice = "暂无可保存内容")
             return
         }
-        saveSpeechResult(text)
+        liveSpeechShouldRun = false
+        liveSpeechJob?.cancel()
+        liveSpeechJob = null
+        val audioUri = liveSpeechAudioFile
+            ?.takeIf { it.isFile && it.length() > 44L }
+            ?.let { Uri.fromFile(it).toString() }
+            .orEmpty()
+        liveSpeechAudioSaved = audioUri.isNotBlank()
+        saveSpeechResult(text, audioUri)
         liveSpeechState = liveSpeechState.copy(
             draft = text,
             partial = "",
             notice = "已保存到历史记录"
         )
+    }
+
+    private fun createLiveSpeechAudioFile(): File {
+        val dir = File(getApplication<Application>().filesDir, "live-speech")
+        dir.mkdirs()
+        return File(dir, "live-speech-${System.currentTimeMillis()}.wav")
     }
 
     fun refreshTranslationStatus() {
@@ -542,15 +582,31 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         BackgroundConversionService.start(getApplication(), ConversionType.Audio, uri, language, performanceMode)
     }
 
-    fun saveSpeechResult(text: String) {
+    fun exportVideoAudio(videoUri: Uri, outputUri: Uri, format: VideoAudioExportFormat) {
+        busy = true
+        progress = 0f
+        currentText = ""
+        statusText = "视频转音频后台导出已开始，可切到后台继续"
+        BackgroundConversionService.start(
+            context = getApplication(),
+            type = ConversionType.VideoAudio,
+            uri = videoUri,
+            language = null,
+            performanceMode = performanceMode,
+            outputUri = outputUri,
+            audioFormat = format.extension
+        )
+    }
+
+    fun saveSpeechResult(text: String, audioUri: String = "") {
         viewModelScope.launch {
             currentText = text
-            statusText = "语音转文字完成"
+            statusText = if (audioUri.isNotBlank()) "语音和文字已保存" else "语音转文字完成"
             app.repository.save(
                 ConversionRecord(
                     type = ConversionType.Audio,
                     title = "实时语音 ${timeLabel(System.currentTimeMillis())}",
-                    sourceUri = "",
+                    sourceUri = audioUri,
                     resultText = text,
                     status = ConversionStatus.Success
                 )
@@ -559,11 +615,28 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun delete(record: ConversionRecord) {
-        viewModelScope.launch { app.repository.delete(record) }
+        viewModelScope.launch {
+            deleteLocalRecordAudio(record)
+            app.repository.delete(record)
+        }
     }
 
     fun clearAll() {
-        viewModelScope.launch { app.repository.clear() }
+        viewModelScope.launch {
+            records.value.forEach(::deleteLocalRecordAudio)
+            app.repository.clear()
+        }
+    }
+
+    private fun deleteLocalRecordAudio(record: ConversionRecord) {
+        val uri = runCatching { Uri.parse(record.audioAssetUri()) }.getOrNull() ?: return
+        if (uri.scheme != "file") return
+        val file = File(uri.path ?: return)
+        val filesDir = getApplication<Application>().filesDir.canonicalFile
+        val target = runCatching { file.canonicalFile }.getOrNull() ?: return
+        if (target.path.startsWith(filesDir.path)) {
+            target.delete()
+        }
     }
 
     fun openCurrentTextNote(text: String = currentText) {
@@ -865,14 +938,19 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
     val clipboard = LocalClipboardManager.current
     val liveSpeechState = viewModel.liveSpeechState
     var showAudioActionDialog by remember { mutableStateOf(false) }
+    var showVideoAudioFormatDialog by remember { mutableStateOf(false) }
     var pendingVideoUri by remember { mutableStateOf<Uri?>(null) }
     var pendingAudioUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingVideoAudioUri by remember { mutableStateOf<Uri?>(null) }
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let(viewModel::recognizeImage)
     }
-    val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+    val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
             pendingAudioUri = it
         }
     }
@@ -883,6 +961,29 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
             }
             pendingVideoUri = it
         }
+    }
+    val videoAudioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            pendingVideoAudioUri = it
+            showVideoAudioFormatDialog = true
+        }
+    }
+    val m4aDocumentCreator = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("audio/mp4")) { outputUri ->
+        val videoUri = pendingVideoAudioUri
+        if (videoUri != null && outputUri != null) {
+            viewModel.exportVideoAudio(videoUri, outputUri, VideoAudioExportFormat.M4a)
+        }
+        pendingVideoAudioUri = null
+    }
+    val wavDocumentCreator = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("audio/wav")) { outputUri ->
+        val videoUri = pendingVideoAudioUri
+        if (videoUri != null && outputUri != null) {
+            viewModel.exportVideoAudio(videoUri, outputUri, VideoAudioExportFormat.Wav)
+        }
+        pendingVideoAudioUri = null
     }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -960,6 +1061,13 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
                     onClick = { showAudioActionDialog = true }
                 )
                 ToolCard(
+                    title = "视频转音频",
+                    subtitle = "从视频中导出 M4A 或 WAV 音频文件",
+                    icon = Icons.Default.UploadFile,
+                    color = Color(0xFF2563EB),
+                    onClick = { videoAudioPicker.launch(arrayOf("video/*")) }
+                )
+                ToolCard(
                     title = "图片转文字",
                     subtitle = "支持相册、截图等图片 OCR，自动保存结果",
                     icon = Icons.Default.Image,
@@ -1018,7 +1126,24 @@ fun WorkbenchScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
             },
             onImportAudio = {
                 showAudioActionDialog = false
-                audioPicker.launch("audio/*")
+                audioPicker.launch(arrayOf("audio/*"))
+            }
+        )
+    }
+
+    if (showVideoAudioFormatDialog) {
+        VideoAudioFormatDialog(
+            onDismiss = {
+                showVideoAudioFormatDialog = false
+                pendingVideoAudioUri = null
+            },
+            onSelect = { format ->
+                showVideoAudioFormatDialog = false
+                val fileName = videoAudioOutputName(context, pendingVideoAudioUri, format)
+                when (format) {
+                    VideoAudioExportFormat.M4a -> m4aDocumentCreator.launch(fileName)
+                    VideoAudioExportFormat.Wav -> wavDocumentCreator.launch(fileName)
+                }
             }
         )
     }
@@ -1061,6 +1186,50 @@ fun AudioActionDialog(
                 Button(onClick = onImportAudio, modifier = Modifier.fillMaxWidth()) {
                     Text("导入音频")
                 }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
+fun VideoAudioFormatDialog(
+    onDismiss: () -> Unit,
+    onSelect: (VideoAudioExportFormat) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("视频转音频") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("选择导出格式", color = Color(0xFF64748B))
+                Button(
+                    onClick = { onSelect(VideoAudioExportFormat.M4a) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("M4A/AAC 推荐")
+                }
+                Text(
+                    "速度快、体积小。需要视频本身包含 AAC 音轨，否则请选择 WAV。",
+                    color = Color(0xFF64748B),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Button(
+                    onClick = { onSelect(VideoAudioExportFormat.Wav) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("WAV 兼容")
+                }
+                Text(
+                    "兼容性更强，文件更大，适合后续识别或剪辑。",
+                    color = Color(0xFF64748B),
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         },
         confirmButton = {},
@@ -2429,6 +2598,7 @@ fun HistoryScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
             FilterChip(selected = filter == ConversionType.Image, onClick = { filter = ConversionType.Image }, label = { Text("图片") })
             FilterChip(selected = filter == ConversionType.Audio, onClick = { filter = ConversionType.Audio }, label = { Text("语音") })
             FilterChip(selected = filter == ConversionType.Video, onClick = { filter = ConversionType.Video }, label = { Text("视频") })
+            FilterChip(selected = filter == ConversionType.VideoAudio, onClick = { filter = ConversionType.VideoAudio }, label = { Text("视频音频") })
         }
         Spacer(Modifier.height(12.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -2440,6 +2610,7 @@ fun HistoryScreen(viewModel: ConverterViewModel, padding: PaddingValues) {
                     record = record,
                     onCopy = { clipboard.setText(AnnotatedString(record.resultText.ifBlank { record.message })) },
                     onShare = { shareText(context, record.resultText.ifBlank { record.message }) },
+                    onShareAudio = { shareAudio(context, record.audioAssetUri()) },
                     onOpenTextNote = { viewModel.openTextNote(record) },
                     onOpenVideoEdit = { viewModel.openVideoEditor(record) },
                     onDelete = { viewModel.delete(record) }
@@ -2454,6 +2625,7 @@ fun HistoryItem(
     record: ConversionRecord,
     onCopy: () -> Unit,
     onShare: () -> Unit,
+    onShareAudio: () -> Unit,
     onOpenTextNote: () -> Unit,
     onOpenVideoEdit: () -> Unit,
     onDelete: () -> Unit
@@ -2489,6 +2661,9 @@ fun HistoryItem(
                 if (record.type == ConversionType.Video && record.status == ConversionStatus.Success) {
                     TextButton(onClick = onOpenVideoEdit) { Text("编辑字幕") }
                 }
+                if (record.audioAssetUri().isNotBlank() && record.status == ConversionStatus.Success) {
+                    TextButton(onClick = onShareAudio) { Text("分享音频") }
+                }
                 IconButton(onClick = onCopy) { Icon(Icons.Default.ContentCopy, contentDescription = "复制") }
                 IconButton(onClick = onShare) { Icon(Icons.Default.Share, contentDescription = "分享") }
                 IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, contentDescription = "删除") }
@@ -2519,6 +2694,37 @@ private fun shareText(context: Context, text: String) {
     context.startActivity(Intent.createChooser(intent, "分享文字"))
 }
 
+private fun shareAudio(context: Context, rawUri: String) {
+    if (rawUri.isBlank()) return
+    val uri = shareableUri(context, rawUri) ?: return
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "audio/*"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        clipData = ClipData.newUri(context.contentResolver, "音频", uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "分享音频"))
+}
+
+private fun shareableUri(context: Context, rawUri: String): Uri? {
+    val parsed = runCatching { Uri.parse(rawUri) }.getOrNull() ?: return null
+    return if (parsed.scheme == "file") {
+        val file = File(parsed.path ?: return null)
+        if (!file.exists()) return null
+        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    } else {
+        parsed
+    }
+}
+
+private fun videoAudioOutputName(context: Context, videoUri: Uri?, format: VideoAudioExportFormat): String {
+    val rawName = videoUri?.let { displayName(context, it) } ?: "视频音频"
+    val baseName = rawName.substringBeforeLast('.', rawName)
+        .ifBlank { "视频音频" }
+        .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    return "$baseName-音频.${format.extension}"
+}
+
 private fun buildLiveSpeechPreview(draft: String, partial: String): String {
     val cleanDraft = draft.trim()
     val cleanPartial = partial.trim()
@@ -2543,6 +2749,14 @@ private fun ConversionRecord.isOpenableVideoRecord(): Boolean =
         status == ConversionStatus.Success &&
         sourceUri.isNotBlank() &&
         (segmentsJson.isNotBlank() || resultText.isNotBlank())
+
+private fun ConversionRecord.audioAssetUri(): String =
+    when (type) {
+        ConversionType.Audio -> sourceUri.ifBlank { outputUri }
+        ConversionType.VideoAudio -> outputUri.ifBlank { sourceUri }
+        ConversionType.Video,
+        ConversionType.Image -> ""
+    }
 
 private fun ConversionRecord.toVideoEditSession(): VideoEditSession? {
     if (!isOpenableVideoRecord()) return null
@@ -2765,6 +2979,7 @@ private fun typeLabel(type: ConversionType): String = when (type) {
     ConversionType.Video -> "视频"
     ConversionType.Audio -> "语音"
     ConversionType.Image -> "图片"
+    ConversionType.VideoAudio -> "视频音频"
 }
 
 private fun statusLabel(status: ConversionStatus): String = when (status) {

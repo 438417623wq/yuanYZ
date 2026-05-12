@@ -3,7 +3,8 @@ package com.goodzh.converter.data
 enum class ConversionType {
     Video,
     Audio,
-    Image
+    Image,
+    VideoAudio
 }
 
 enum class ConversionStatus {
@@ -17,6 +18,7 @@ data class ConversionRecord(
     val type: ConversionType,
     val title: String,
     val sourceUri: String,
+    val outputUri: String = "",
     val resultText: String,
     val segmentsJson: String = "",
     val translatedText: String = "",

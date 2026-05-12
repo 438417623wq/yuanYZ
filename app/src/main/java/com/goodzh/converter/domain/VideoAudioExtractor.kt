@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -14,6 +15,37 @@ import java.nio.ByteOrder
 import kotlin.math.roundToInt
 
 class VideoAudioExtractor(private val context: Context) {
+    suspend fun exportToWav(
+        inputUri: Uri,
+        outputUri: Uri,
+        onProgress: (Float) -> Unit
+    ): File = withContext(Dispatchers.IO) {
+        val wav = extractToWav(inputUri) { value -> onProgress(value * 0.92f) }
+        try {
+            copyFileToUri(wav, outputUri)
+            onProgress(1f)
+            wav
+        } finally {
+            wav.delete()
+        }
+    }
+
+    suspend fun exportToM4a(
+        inputUri: Uri,
+        outputUri: Uri,
+        onProgress: (Float) -> Unit
+    ): File = withContext(Dispatchers.IO) {
+        val temp = File(context.cacheDir, "video-audio-${System.currentTimeMillis()}.m4a")
+        extractAacTrackToM4a(inputUri, temp, onProgress)
+        try {
+            copyFileToUri(temp, outputUri)
+            onProgress(1f)
+            temp
+        } finally {
+            temp.delete()
+        }
+    }
+
     suspend fun extractToWav(uri: Uri, onProgress: (Float) -> Unit): File = withContext(Dispatchers.IO) {
         val output = File(context.cacheDir, "video-audio-${System.currentTimeMillis()}.wav")
         val extractor = MediaExtractor()
@@ -91,6 +123,72 @@ class VideoAudioExtractor(private val context: Context) {
             decoder.release()
             extractor.release()
         }
+    }
+
+    private fun extractAacTrackToM4a(uri: Uri, output: File, onProgress: (Float) -> Unit) {
+        val extractor = MediaExtractor()
+        extractor.setDataSource(context, uri, null)
+        val trackIndex = (0 until extractor.trackCount).firstOrNull { index ->
+            extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+        } ?: error("这个视频没有可导出的音频轨道")
+
+        val inputFormat = extractor.getTrackFormat(trackIndex)
+        val mime = inputFormat.getString(MediaFormat.KEY_MIME) ?: error("无法识别音频格式")
+        if (mime != "audio/mp4a-latm") {
+            extractor.release()
+            error("当前视频音轨不是 AAC，无法快速导出 M4A，请选择 WAV 导出")
+        }
+
+        val durationUs = if (inputFormat.containsKey(MediaFormat.KEY_DURATION)) {
+            inputFormat.getLong(MediaFormat.KEY_DURATION)
+        } else {
+            0L
+        }
+        val bufferSize = if (inputFormat.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+            inputFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE).coerceAtLeast(256 * 1024)
+        } else {
+            256 * 1024
+        }
+
+        output.parentFile?.mkdirs()
+        val muxer = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        try {
+            extractor.selectTrack(trackIndex)
+            val muxerTrack = muxer.addTrack(inputFormat)
+            muxer.start()
+
+            val buffer = ByteBuffer.allocateDirect(bufferSize)
+            val info = MediaCodec.BufferInfo()
+            while (true) {
+                buffer.clear()
+                val sampleSize = extractor.readSampleData(buffer, 0)
+                if (sampleSize < 0) break
+                info.set(
+                    0,
+                    sampleSize,
+                    extractor.sampleTime.coerceAtLeast(0L),
+                    extractor.sampleFlags
+                )
+                muxer.writeSampleData(muxerTrack, buffer, info)
+                if (durationUs > 0L) {
+                    onProgress((info.presentationTimeUs.toFloat() / durationUs).coerceIn(0f, 0.96f))
+                }
+                extractor.advance()
+            }
+            onProgress(0.98f)
+        } finally {
+            runCatching { muxer.stop() }
+            muxer.release()
+            extractor.release()
+        }
+    }
+
+    private fun copyFileToUri(file: File, uri: Uri) {
+        context.contentResolver.openOutputStream(uri, "w")?.use { output ->
+            file.inputStream().buffered().use { input ->
+                input.copyTo(output)
+            }
+        } ?: error("无法写入选择的保存位置")
     }
 }
 
